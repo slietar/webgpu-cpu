@@ -1,5 +1,6 @@
 use std::io::Write as _;
 
+use codegen::ir;
 use cranelift::codegen::ir::types as types;
 use cranelift::prelude::*;
 use cranelift::jit::{JITBuilder, JITModule};
@@ -55,6 +56,14 @@ fn translate_type(shader_type: &naga::Type, config: &Config) -> (types::Type, us
 }
 
 
+fn resolve_inner_type<'a>(module: &'a naga::Module, expr_info: &'a naga::valid::ExpressionInfo) -> &'a naga::TypeInner {
+    match &expr_info.ty {
+        TypeResolution::Handle(handle) => &module.types[*handle].inner,
+        TypeResolution::Value(type_value) => &type_value,
+    }
+}
+
+
 fn translate_expr(
     fn_builder: &mut FunctionBuilder<'_>,
     module: &naga::Module,
@@ -66,26 +75,71 @@ fn translate_expr(
     arg_offsets: &[usize],
     config: &Config,
 ) -> Vec<Value> {
-    let expr_type = match &expr_info.ty {
-        TypeResolution::Handle(handle) => &module.types[*handle].inner,
-        TypeResolution::Value(type_value) => &type_value,
-    };
+    // let expr_type = match &expr_info.ty {
+    //     TypeResolution::Handle(handle) => &module.types[*handle].inner,
+    //     TypeResolution::Value(type_value) => &type_value,
+    // };
 
+    let expr_type = resolve_inner_type(module, expr_info);
     let item_size = get_type_item_size(expr_type);
     let (lane_count, vector_count) = compute_sizes(item_size, config);
 
     match expr {
+        naga::Expression::As { expr, kind, convert } => {
+            let values = translate_expr(fn_builder, module, block, function, function_info, &function.expressions[*expr], &function_info[*expr], arg_offsets, config);
+
+            let input_type = resolve_inner_type(module, &function_info[*expr]);
+            let input_item_size = get_type_item_size(input_type);
+
+            match input_type {
+                naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Float, width: _ }) => {
+                    match (input_item_size, convert, lane_count) {
+                        (4, Some(8), 2) => {
+                            (0..(vector_count / 2)).flat_map(|input_vector_index| {
+                                let mem_flags = ir::MemFlags::new().with_endianness(ir::Endianness::Little);
+
+                                let output_low = fn_builder.ins().fvpromote_low(values[input_vector_index]);
+
+                                let swizzle_indices_const = fn_builder.func.dfg.constants.insert(
+                                    [8, 9, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0, 0, 0, 0, 0].iter().copied().collect::<_>(),
+                                );
+
+                                let swizzle_indices = fn_builder.ins().vconst(types::I8X16, swizzle_indices_const);
+                                let byte_vector = fn_builder.ins().bitcast(types::I8X16, mem_flags, values[input_vector_index]);
+                                let swizzled_byte_vector = fn_builder.ins().swizzle(byte_vector, swizzle_indices);
+
+                                let swizzled = fn_builder.ins().bitcast(types::F32X4, mem_flags, swizzled_byte_vector);
+                                let output_high = fn_builder.ins().fvpromote_low(swizzled);
+
+                                vec![output_low, output_high]
+                            }).collect::<Vec<_>>()
+                        },
+                        (8, Some(4), 4) => {
+                            todo!()
+                        },
+                        _ => unimplemented!(),
+                    }
+                },
+                _ => todo!(),
+            }
+        },
         naga::Expression::Literal(literal) => {
             match literal {
                 naga::Literal::F32(v) => {
-                    // let (lane_count, vector_count) = compute_sizes(4, config);
-
                     let item = fn_builder.ins().f32const(*v);
                     let vector = fn_builder.ins().splat(types::F32X4, item);
 
                     vec![vector; vector_count]
                 },
-                _ => unimplemented!(),
+                naga::Literal::F64(v) => {
+                    let item = fn_builder.ins().f64const(*v);
+                    let vector = fn_builder.ins().splat(types::F64X2, item);
+
+                    vec![vector; vector_count]
+                },
+                _ => {
+                    panic!("unimplemented: {:?}", literal);
+                },
             }
         },
         naga::Expression::FunctionArgument(arg) => {
@@ -195,18 +249,18 @@ fn translate_func(module: &naga::Module, module_info: &naga::valid::ModuleInfo, 
 fn main() {
     let config = Config {
         bandwidth_size: 16,
-        subgroup_count: 8,
+        subgroup_count: 4,
     };
 
     let module = naga::front::wgsl::parse_str("
-        fn main(x: f32) -> f32 {
-            return x * 2.0;
+        fn main(x: f32) -> f64 {
+            return f64(x) * 2.0;
             // return sqrt(x + 4.0) * 2.0;
         }
     ").unwrap();
 
     let module_info = naga::valid::Validator::new(
-        naga::valid::ValidationFlags::default(), naga::valid::Capabilities::default()
+        naga::valid::ValidationFlags::default(), naga::valid::Capabilities::default() | naga::valid::Capabilities::FLOAT64,
     ).validate(&module).unwrap();
 
     // eprintln!("{:#?}", module.functions.iter().next().unwrap().1);
