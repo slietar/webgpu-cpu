@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bytemuck = "1.18.0"
 cranelift = { version = "0.112.0", features = ["jit", "module", "native"] }
 cranelift-object = "0.112.1"
 naga = "22.1.0"

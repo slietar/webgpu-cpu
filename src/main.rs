@@ -1,3 +1,5 @@
+use std::any::Any;
+use std::collections::HashMap;
 use std::io::Write as _;
 
 use codegen::ir;
@@ -9,17 +11,65 @@ use cranelift::codegen::isa::CallConv;
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift::module::Module as _;
 use naga::proc::TypeResolution;
+use naga::ResourceBinding;
+
+
+const POINTER_TYPE: types::Type = types::I64;
 
 
 #[derive(Debug)]
 struct Config {
     bandwidth_size: usize, // Usually 16
-    subgroup_count: usize, // Usually 4
+    subgroup_width: usize,
 }
+
+#[derive(Debug)]
+enum ExprRepr {
+    Constant(Value, ir::Type),
+    Scalars(Vec<Value>, ir::Type),
+    Vectors(Vec<Value>),
+}
+
+impl ExprRepr {
+    fn into_scalars(self, fn_builder: &mut FunctionBuilder<'_>, config: &Config) -> Vec<Value> {
+        match self {
+            ExprRepr::Constant(value, _) => vec![value; config.subgroup_width],
+            ExprRepr::Scalars(scalars, _) => scalars,
+            ExprRepr::Vectors(vectors) => {
+                let vector_count = vectors.len();
+                let lane_count = config.subgroup_width / vector_count;
+
+                (0..config.subgroup_width).map(|item_index| {
+                    fn_builder.ins().extractlane(vectors[item_index / lane_count], (item_index % lane_count) as u8)
+                }).collect::<Vec<_>>()
+            },
+        }
+    }
+
+    fn into_vectors(self, fn_builder: &mut FunctionBuilder<'_>, config: &Config) -> Vec<Value> {
+        match self {
+            ExprRepr::Constant(value, ty) => vec![fn_builder.ins().splat(ty, value); config.subgroup_width],
+            ExprRepr::Scalars(scalars, ty) => {
+                let vector_count = scalars.len();
+                let lane_count = config.subgroup_width / vector_count;
+
+                (0..lane_count).map(|lane_index| {
+                    let init_vector = fn_builder.ins().scalar_to_vector(ty, scalars[0]);
+
+                    scalars.iter().copied().enumerate().skip(1).fold(init_vector, |acc, (scalar_index, scalar)| {
+                        fn_builder.ins().insertlane(acc, scalar, scalar_index as u8)
+                    })
+                }).collect::<Vec<_>>()
+            },
+            ExprRepr::Vectors(vectors) => vectors,
+        }
+    }
+}
+
 
 fn compute_sizes(item_size: usize, config: &Config) -> (usize, usize) {
     let lane_count = config.bandwidth_size / item_size;
-    let vector_count = item_size * config.subgroup_count / config.bandwidth_size;
+    let vector_count = item_size * config.subgroup_width / config.bandwidth_size;
 
     (lane_count, vector_count)
 }
@@ -27,6 +77,7 @@ fn compute_sizes(item_size: usize, config: &Config) -> (usize, usize) {
 fn get_type_item_size(shader_type: &naga::TypeInner) -> usize {
     match shader_type {
         naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Float, width }) => *width as usize,
+        naga::TypeInner::Pointer { base, space } => 8,
         _ => unimplemented!(),
     }
 }
@@ -35,12 +86,12 @@ fn get_type_item_size(shader_type: &naga::TypeInner) -> usize {
 fn translate_type(shader_type: &naga::Type, config: &Config) -> (types::Type, usize /* vector count */) {
     let item_size = get_type_item_size(&shader_type.inner);
 
-    // total_size = item_size * subgroup_count
+    // total_size = item_size * subgroup_width
     // total_size = bandwidth_size * vector_count
     // bandwidth_size = item_size * lane_count
 
     // let lane_count = config.bandwidth_size / item_size;
-    // let vector_count = item_size * config.subgroup_count / config.bandwidth_size;
+    // let vector_count = item_size * config.subgroup_width / config.bandwidth_size;
 
     let (lane_count, vector_count) = compute_sizes(item_size, config);
 
@@ -73,8 +124,9 @@ fn translate_expr(
     expr: &naga::Expression,
     expr_info: &naga::valid::ExpressionInfo,
     arg_offsets: &[usize],
+    global_var_map: &HashMap<naga::Handle<naga::GlobalVariable>, usize>,
     config: &Config,
-) -> Vec<Value> {
+) -> ExprRepr {
     // let expr_type = match &expr_info.ty {
     //     TypeResolution::Handle(handle) => &module.types[*handle].inner,
     //     TypeResolution::Value(type_value) => &type_value,
@@ -85,8 +137,8 @@ fn translate_expr(
     let (lane_count, vector_count) = compute_sizes(item_size, config);
 
     match expr {
-        naga::Expression::As { expr, kind, convert } => {
-            let values = translate_expr(fn_builder, module, block, function, function_info, &function.expressions[*expr], &function_info[*expr], arg_offsets, config);
+/*         naga::Expression::As { expr, kind, convert } => {
+            let values = translate_expr(fn_builder, module, block, function, function_info, &function.expressions[*expr], &function_info[*expr], arg_offsets, global_var_map, config);
 
             let input_type = resolve_inner_type(module, &function_info[*expr]);
             let input_item_size = get_type_item_size(input_type);
@@ -122,20 +174,19 @@ fn translate_expr(
                 },
                 _ => todo!(),
             }
-        },
+        }, */
         naga::Expression::Literal(literal) => {
             match literal {
                 naga::Literal::F32(v) => {
                     let item = fn_builder.ins().f32const(*v);
-                    let vector = fn_builder.ins().splat(types::F32X4, item);
-
-                    vec![vector; vector_count]
+                    ExprRepr::Constant(item, types::F32X4)
                 },
                 naga::Literal::F64(v) => {
                     let item = fn_builder.ins().f64const(*v);
-                    let vector = fn_builder.ins().splat(types::F64X2, item);
+                    ExprRepr::Constant(item, types::F64X2)
 
-                    vec![vector; vector_count]
+                    // let vector = fn_builder.ins().splat(types::F64X2, item);
+                    // vec![vector; vector_count]
                 },
                 _ => {
                     panic!("unimplemented: {:?}", literal);
@@ -145,25 +196,27 @@ fn translate_expr(
         naga::Expression::FunctionArgument(arg) => {
             let offset = arg_offsets[*arg as usize];
 
-            fn_builder.block_params(block)[offset..(offset + vector_count)].to_vec()
+            ExprRepr::Vectors(fn_builder.block_params(block)[offset..(offset + vector_count)].to_vec())
         },
         naga::Expression::Binary { op, left, right } => {
-            let left_values = translate_expr(fn_builder, module, block, function, function_info, &function.expressions[*left], &function_info[*left], arg_offsets, config);
-            let right_values = translate_expr(fn_builder, module, block, function, function_info, &function.expressions[*right], &function_info[*right], arg_offsets, config);
+            let left_values = translate_expr(fn_builder, module, block, function, function_info, &function.expressions[*left], &function_info[*left], arg_offsets, global_var_map, config).into_vectors(fn_builder, config);
+            let right_values = translate_expr(fn_builder, module, block, function, function_info, &function.expressions[*right], &function_info[*right], arg_offsets, global_var_map, config).into_vectors(fn_builder, config);
 
-            (0..vector_count).map(|vector_index| {
-                let ins = fn_builder.ins();
-                let left = left_values[vector_index];
-                let right = right_values[vector_index];
+            ExprRepr::Vectors(
+                (0..vector_count).map(|vector_index| {
+                    let ins = fn_builder.ins();
+                    let left = left_values[vector_index];
+                    let right = right_values[vector_index];
 
-                match op {
-                    naga::BinaryOperator::Add => ins.fadd(left, right),
-                    naga::BinaryOperator::Subtract => ins.fsub(left, right),
-                    naga::BinaryOperator::Multiply => ins.fmul(left, right),
-                    naga::BinaryOperator::Divide => ins.fdiv(left, right),
-                    _ => unimplemented!(),
-                }
-            }).collect::<Vec<_>>()
+                    match op {
+                        naga::BinaryOperator::Add => ins.fadd(left, right),
+                        naga::BinaryOperator::Subtract => ins.fsub(left, right),
+                        naga::BinaryOperator::Multiply => ins.fmul(left, right),
+                        naga::BinaryOperator::Divide => ins.fdiv(left, right),
+                        _ => unimplemented!(),
+                    }
+                }).collect::<Vec<_>>()
+            )
         },
 /*         naga::Expression::Math { fun, arg, arg1, arg2, arg3 } => {
             let args = [Some(*arg), *arg1, *arg2, *arg3].iter().filter_map(|x| x.and_then(|handle| {
@@ -180,6 +233,54 @@ fn translate_expr(
                 _ => unimplemented!(),
             }
         }, */
+        naga::Expression::Load { pointer: pointer_handle } => {
+            let pointer = translate_expr(fn_builder, module, block, function, function_info, &function.expressions[*pointer_handle], &function_info[*pointer_handle], arg_offsets, global_var_map, config);
+            let pointer_scalars = pointer.into_scalars(fn_builder, config);
+
+            // let pointer_offset = match pointer {
+            //     ExprRepr::Constant(value, _) => value,
+            //     _ => unreachable!(),
+            // };
+
+            ExprRepr::Scalars(
+                pointer_scalars.iter().map(|pointer_offset| {
+                    fn_builder.ins().load(types::F32, ir::MemFlags::new(), *pointer_offset, 0)
+                }).collect::<Vec<_>>(),
+                types::F32X4,
+            )
+        },
+        naga::Expression::AccessIndex { base: base_handle, index } => {
+            // let base = &function.expressions[*base_handle];
+            // let base_info = &function_info[*base_handle];
+
+            let base_value = match function.expressions[*base_handle] {
+                naga::Expression::GlobalVariable(global_var_handle) => {
+                    let offset = global_var_map[&global_var_handle];
+                    let value = fn_builder.block_params(block)[offset];
+
+                    value
+                },
+                _ => todo!(),
+            };
+
+            // let values = translate_expr(fn_builder, module, block, function, function_info, base, base_info, arg_offsets, global_var_map, config);
+            // eprintln!("> {:#?}", values);
+            // eprintln!("> {:#?}", index);
+
+            ExprRepr::Constant(fn_builder.ins().iadd_imm(base_value, *index as i64), types::F32X4)
+        },
+        // naga::Expression::GlobalVariable(handle) => {
+        //     let offset = global_var_map[handle];
+        //     // let global_var = module.global_variables.try_get(*handle).unwrap();
+
+        //     // global_var.ty
+        //     // let expr_type = resolve_inner_type(module, expr_info);
+        //     // let item_size = get_type_item_size(expr_type);
+        //     // let (lane_count, vector_count) = compute_sizes(item_size, config);
+
+        //     ExprRepr::Constant(fn_builder.block_params(block)[offset], POINTER_TYPE)
+        //     // ExprRepr::Vectors(fn_builder.block_params(block)[offset..(offset + vector_count)].to_vec())
+        // },
         _ => {
             panic!("unimplemented: {:?}", expr);
         },
@@ -211,6 +312,24 @@ fn translate_func(module: &naga::Module, module_info: &naga::valid::ModuleInfo, 
         }
     }
 
+    let mut sorted_bounded_global_variables = module.global_variables
+        .iter()
+        .filter_map(|(handle, global_var)| match global_var.binding {
+            Some(ResourceBinding { group, binding }) => Some((handle, (group, binding))),
+            None => None,
+        })
+        .collect::<Vec<_>>();
+
+    sorted_bounded_global_variables.sort_by_key(|(_, key)| *key);
+    let sorted_bounded_global_variables = sorted_bounded_global_variables.into_iter().map(|(global_var, _)| global_var).collect::<Vec<_>>();
+
+    let mut global_var_map = HashMap::new();
+
+    for handle in sorted_bounded_global_variables {
+        global_var_map.insert(handle, cl_signature.params.len());
+        cl_signature.params.push(AbiParam::new(POINTER_TYPE));
+    }
+
     let mut cl_fn_builder_ctx = FunctionBuilderContext::new();
     let mut cl_func = Function::with_name_signature(UserFuncName::user(0, 0), cl_signature.clone());
 
@@ -224,16 +343,32 @@ fn translate_func(module: &naga::Module, module_info: &naga::valid::ModuleInfo, 
 
     for stat in function.body.iter() {
         match stat {
-            naga::Statement::Return { value } => {
-                let expr = &function.expressions[value.unwrap()];
-                let expr_info = &function_info[value.unwrap()];
-                let return_values = translate_expr(&mut fn_builder, module, block, function, function_info, expr, expr_info, &arg_offsets, config);
+            naga::Statement::Store { pointer: pointer_handle, value: value_handle } => {
+                let pointer = translate_expr(&mut fn_builder, module, block, function, function_info, &function.expressions[*pointer_handle], &function_info[*pointer_handle], &arg_offsets, &global_var_map, config);
+                let value = translate_expr(&mut fn_builder, module, block, function, function_info, &function.expressions[*value_handle], &function_info[*value_handle], &arg_offsets, &global_var_map, config);
 
-                fn_builder.ins().return_(&return_values);
+                // eprintln!("Pointer = {:#?}", pointer);
+                // eprintln!("Value = {:#?}", value);
+
+                let pointer_scalars = pointer.into_scalars(&mut fn_builder, config);
+                let value_scalars = value.into_scalars(&mut fn_builder, config);
+
+                for (pointer_scalar, value_scalar) in pointer_scalars.iter().zip(value_scalars.iter()) {
+                    fn_builder.ins().store(ir::MemFlags::new(), *value_scalar, *pointer_scalar, 0);
+                }
             },
+            // naga::Statement::Return { value } => {
+            //     let expr = &function.expressions[value.unwrap()];
+            //     let expr_info = &function_info[value.unwrap()];
+            //     let return_values = translate_expr(&mut fn_builder, module, block, function, function_info, expr, expr_info, &arg_offsets, global_var_map, config);
+
+            //     fn_builder.ins().return_(&return_values);
+            // },
             _ => {},
         }
     }
+
+    fn_builder.ins().return_(&[]);
 
     // fn_builder.seal_block(block);
 
@@ -249,15 +384,23 @@ fn translate_func(module: &naga::Module, module_info: &naga::valid::ModuleInfo, 
 fn main() {
     let config = Config {
         bandwidth_size: 16,
-        subgroup_count: 4,
+        subgroup_width: 4,
     };
 
     let module = naga::front::wgsl::parse_str("
-        fn main(x: f32) -> f64 {
-            return f64(x) * 2.0;
-            // return sqrt(x + 4.0) * 2.0;
+        @group(0) @binding(0)
+        var<storage, read> input: array<f32>;
+
+        @group(0) @binding(1)
+        var<storage, read_write> output: array<f32>;
+
+        fn main() {
+            // let a = 2;
+            output[0] = input[2] * 3.0;
         }
     ").unwrap();
+
+    eprintln!("{:#?}", module);
 
     let module_info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::default(), naga::valid::Capabilities::default() | naga::valid::Capabilities::FLOAT64,
@@ -285,9 +428,11 @@ fn main() {
 
     eprintln!("{:?}", result);
 
-    let isa = isa_builder.finish(flags).unwrap();
+    // let isa = isa_builder.finish(flags).unwrap();
+    // eprintln!("{:?}", isa.pointer_type());
 
-    let mut jit_module = JITModule::new(JITBuilder::with_isa(isa.clone(), cranelift::module::default_libcall_names()));
+
+    // let mut jit_module = JITModule::new(JITBuilder::with_isa(isa.clone(), cranelift::module::default_libcall_names()));
 
     // let mut ctx = jit_module.make_context();
     // let mut func_ctx = FunctionBuilderContext::new();
@@ -298,17 +443,15 @@ fn main() {
     //     .declare_function("a", cranelift::module::Linkage::Local, &func_sig)
     //     .unwrap();
 
-    // let res = jit_module.define_function(func_id, &mut func_ctx);
-
+    // jit_module.define_function(func_id, &mut func_ctx).unwrap();
     // jit_module.finalize_definitions().unwrap();
 
     // let code = jit_module.get_finalized_function(func_id);
-    // eprintln!("{:?}", code);
-    // eprintln!("{:?}", res);
+    // let func = unsafe { std::mem::transmute::<_, fn(f32, f32, f32, f32) -> (f32, f32, f32, f32)>(code) };
 
-    // let mut output = String::new();
+    // // eprintln!("{:?}", code);
+    // eprintln!("{:?}", func(2.0, 3.0, 4.0, 5.0));
 
-    // eprintln!("{}", output);
 
     // let mut module2 = cranelift_object::ObjectModule::new(cranelift_object::ObjectBuilder::new(
     //     isa,
@@ -331,4 +474,13 @@ fn main() {
 
     // let mut file = std::fs::File::create("output.o").unwrap();
     // file.write_all(&output).unwrap();
+
+
+    let input_data = (0..4).map(|x| x as f32).collect::<Vec<_>>();
+    let mut output_data = vec![0.0; 4];
+
+    let input_buffer: &[u8] = bytemuck::cast_slice(&input_data);
+    let output_buffer: &mut [u8] = bytemuck::cast_slice_mut(&mut output_data);
+
+    let buffers = vec![input_buffer, output_buffer];
 }
