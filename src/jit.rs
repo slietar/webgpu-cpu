@@ -8,9 +8,11 @@ use crate::config::Config;
 use naga::proc::TypeResolution;
 
 
+pub type BindGroups<'a> = [BindGroup<'a>];
+
 #[derive(Debug)]
 pub struct BindGroup<'a> {
-    entries: &'a [BindEntry<'a>],
+    pub entries: &'a [BindEntry<'a>],
 }
 
 #[derive(Debug)]
@@ -19,18 +21,77 @@ pub enum BindEntry<'a> {
     WritableBuffer(&'a mut [u8]),
 }
 
-
-pub struct CompiledPipeline {
-
-}
-
-impl CompiledPipeline {
-    fn run(thread_count: usize, bind_groups: &[BindGroup<'_>]) {
-
+impl<'a, T: bytemuck::NoUninit + bytemuck::AnyBitPattern> From<&'a [T]> for BindEntry<'a> {
+    fn from(slice: &'a [T]) -> Self {
+        Self::ReadableBuffer(bytemuck::cast_slice(slice))
     }
 }
 
-pub fn jit_compile(source_code: &str, config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+impl<'a, T: bytemuck::NoUninit + bytemuck::AnyBitPattern> From<&'a mut [T]> for BindEntry<'a> {
+    fn from(slice: &'a mut [T]) -> Self {
+        Self::WritableBuffer(bytemuck::cast_slice_mut(slice))
+    }
+}
+
+
+#[derive(Debug)]
+#[repr(C, packed)]
+pub(crate) struct RuntimeBuiltins {
+    subgroup_id: u32,
+}
+
+
+#[derive(Debug)]
+pub struct CompiledPipeline {
+    config: Config,
+    func_pointer: fn(*const u8, *const u8) -> (),
+}
+
+impl CompiledPipeline {
+    pub fn run(&self, thread_count: usize, bind_groups: &[BindGroup<'_>]) {
+        assert_eq!(thread_count % self.config.bandwidth_size, 0);
+        let subgroup_count = thread_count / self.config.bandwidth_size;
+
+        let mut builtins = RuntimeBuiltins {
+            subgroup_id: 0,
+        };
+
+        let builtins_pointer = &builtins as *const _ as *const u8;
+
+        fn get_first_item_pointer<T>(slice: &[T]) -> *const u8 {
+            if !slice.is_empty() {
+                &slice[0] as *const _ as *const u8
+            } else {
+                std::ptr::null()
+            }
+        }
+
+        let global_vars = bind_groups
+            .iter()
+            .flat_map(|bind_group| {
+                bind_group.entries
+                    .iter()
+                    .map(|entry| {
+                        match entry {
+                            BindEntry::ReadableBuffer(slice)
+                                => get_first_item_pointer(slice),
+                            BindEntry::WritableBuffer(slice)
+                                => get_first_item_pointer(slice),
+                        }
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        let global_vars_pointer = get_first_item_pointer(&global_vars);
+
+        for subgroup_index in 0..subgroup_count {
+            builtins.subgroup_id = subgroup_index as u32;
+            (self.func_pointer)(builtins_pointer, global_vars_pointer);
+        }
+    }
+}
+
+pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipeline, Box<dyn std::error::Error>> {
     // Parse and validate module
 
     let module = naga::front::wgsl::parse_str(source_code)?;
@@ -39,7 +100,10 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<(), Box<dyn std
         naga::valid::ValidationFlags::default(), naga::valid::Capabilities::default() | naga::valid::Capabilities::FLOAT64,
     ).validate(&module)?;
 
-    let target = module.functions.iter().next().unwrap();
+    // eprintln!("{:#?}", module_info);
+    let target = &module.entry_points[0];
+    let target_info = module_info.get_entry_point(0);
+    // let target = module.entry_points[0].function;
 
 
     // Build ISA
@@ -52,8 +116,6 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<(), Box<dyn std
     let isa_builder = cranelift::native::builder().unwrap();
     let flags = cranelift::codegen::settings::Flags::new(flag_builder);
     let isa = isa_builder.finish(flags.clone()).unwrap();
-
-    // eprintln!("{:?}", isa.pointer_type());
 
 
     // Build context
@@ -105,7 +167,7 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<(), Box<dyn std
     //     layouter[constant.ty]
     // }).collect::<Vec<_>>();
 
-    // eprintln!("{:#?}", const_layouts);
+    // eprintln!("{:#?}", module);
     // eprintln!("{:?}", assemble(&const_layouts));
 
     let mut jit_module = jit::JITModule::new(
@@ -133,18 +195,31 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<(), Box<dyn std
     };
 
 
-    let (func, func_sig) = crate::translate::translate_func(&module_context, target.1, &module_info[target.0]);
+    let (func, func_sig) = crate::translate::translate_func(&module_context, &target.function, &target_info);
     cranelift::codegen::verify_function(&func, &flags)?;
 
+    let mut func_ctx = cranelift::codegen::Context::for_function(func);
 
+    let func_id = jit_module
+        .declare_function("a", cranelift::module::Linkage::Local, &func_sig)
+        .unwrap();
+
+    jit_module.define_function(func_id, &mut func_ctx)?;
     jit_module.finalize_definitions()?;
 
-    let x = jit_module.get_finalized_data(constants_data_id);
+    // jit_module.define_function(func_id, &mut func_ctx).unwrap();
+    // let x = jit_module.get_finalized_data(constants_data_id);
     // eprintln!("{:?}", assemble(&[]));
+
+    let code = jit_module.get_finalized_function(func_id);
+    let real_func = unsafe { std::mem::transmute::<_, fn(*const u8, *const u8) -> ()>(code) };
 
     // eprintln!("{:?}", result);
 
-    Ok(())
+    Ok(CompiledPipeline {
+        config: config.clone(),
+        func_pointer: real_func,
+    })
 }
 
 

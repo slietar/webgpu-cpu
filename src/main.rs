@@ -18,7 +18,7 @@ fn main() {
         subgroup_width: 4,
     };
 
-    let result = crate::jit::jit_compile("
+    let pipeline = crate::jit::jit_compile("
         // struct S {
         //     x: f32,
         //     y: f32,
@@ -39,15 +39,29 @@ fn main() {
         // var<storage, read> input: array<f32>;
 
         @group(0) @binding(0)
-        var<storage, read_write> output: array<f32>;
+        var<storage, read_write> output: array<f32, 16>;
 
         // var<workgroup> x: array<f32, 16>;
 
-        fn main() {
-            // let a = 2;
-            output[0] = c; // input[2] * 3.0 * f32(blockSize) * specular_param;
+        @compute
+        @workgroup_size(1)
+        fn main(@builtin(local_invocation_index) thread_id: u32) {
+            output[0] = 2.0;
+            // input[2] * 3.0 * f32(blockSize) * specular_param;
         }
     ", &config).unwrap();
+
+    let mut output_buffer = vec![0.0f32; 16];
+
+    let bind_groups: &jit::BindGroups = &[
+        jit::BindGroup { entries: &[output_buffer.as_mut_slice().into()] },
+    ];
+
+    pipeline.run(16, bind_groups);
+
+    // eprintln!("{:#?}", pipeline);
+    eprintln!("{:?}", output_buffer);
+
 
 /*     let module = naga::front::wgsl::parse_str("
         @group(0) @binding(0)

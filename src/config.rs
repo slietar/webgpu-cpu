@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Config {
     pub bandwidth_size: usize, // Usually 16
     pub subgroup_width: usize,

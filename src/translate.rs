@@ -194,7 +194,7 @@ fn translate_expr(
             // let base = &function.expressions[*base_handle];
             // let base_info = &function_info[*base_handle];
 
-            let base_value = match func_context.function.expressions[*base_handle] {
+            let base_pointer_value = match func_context.function.expressions[*base_handle] {
                 naga::Expression::GlobalVariable(global_var_handle) => {
                     let global_var_index = module_context.global_var_map[&global_var_handle];
                     let global_vars_pointer = builder.block_params(block)[1];
@@ -209,11 +209,7 @@ fn translate_expr(
                 _ => todo!(),
             };
 
-            // let values = translate_expr(fn_builder, module, block, function, function_info, base, base_info, arg_offsets, global_var_map, config);
-            // eprintln!("> {:#?}", values);
-            // eprintln!("> {:#?}", index);
-
-            ExprRepr::Constant(builder.ins().iadd_imm(base_value, *index as i64), types::F32X4)
+            ExprRepr::Constant(builder.ins().iadd_imm(base_pointer_value, (index * 1u32 /* TODO: Change */) as i64), types::I64X2)
         },
         naga::Expression::Constant(handle) => {
             let constants_pointer = builder.ins().global_value(module_context.pointer_type, func_context.constants_global_value);
