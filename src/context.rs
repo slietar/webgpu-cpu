@@ -24,8 +24,9 @@ impl<'a> ModuleContext<'a, '_> {
             naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Float, width }) => *width as usize,
             naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Sint, width }) => *width as usize,
             naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Uint, width }) => *width as usize,
-            naga::TypeInner::Pointer { base, space } => self.pointer_type.bytes() as usize,
-            _ => unimplemented!(),
+            naga::TypeInner::Pointer { .. } => self.pointer_type.bytes() as usize,
+            naga::TypeInner::Struct { span, .. } => *span as usize,
+            _ => panic!("Unsupported type {:?}", shader_type),
         }
     }
 

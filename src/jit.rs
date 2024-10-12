@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 
-use cranelift::codegen::ir;
 use cranelift::jit;
 use cranelift::module::{DataDescription, Module};
 use cranelift::prelude::Configurable;
 use crate::config::Config;
-use naga::proc::TypeResolution;
+use crate::constants::build_constant;
 
 
 pub type BindGroups<'a> = [BindGroup<'a>];
@@ -103,10 +102,13 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
         naga::valid::ValidationFlags::default(), naga::valid::Capabilities::default() | naga::valid::Capabilities::FLOAT64,
     ).validate(&module)?;
 
+    let mut layouter = naga::proc::Layouter::default();
+    layouter.update(module.to_ctx())?;
+
     let target = &module.entry_points[0];
     let target_info = module_info.get_entry_point(0);
 
-    eprintln!("{:#?}", target);
+    // eprintln!("{:#?}", target);
 
 
     // Build ISA
@@ -121,7 +123,14 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
     let isa = isa_builder.finish(flags.clone()).unwrap();
 
 
-    // Build context
+    // Build JIT module
+
+    let mut jit_module = jit::JITModule::new(
+        jit::JITBuilder::with_isa(isa.clone(), cranelift::module::default_libcall_names())
+    );
+
+
+    // Build global variables
 
     let mut sorted_bounded_global_variables = module.global_variables
         .iter()
@@ -157,34 +166,40 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
     //     // eprintln!("{:#?}", module.global_expressions[constant.init]);
     // }
 
+
+    // Build constants
+
     let constant_map = module.constants
         .iter()
         .enumerate()
         .map(|(index, (handle, _))| (handle, index))
         .collect::<HashMap<_, _>>();
 
-    // let const_layouts = module.constants.iter().map(|(handle, constant)| {
-    //     layouter[constant.ty]
-    // }).collect::<Vec<_>>();
+    let constant_layouts = module.constants
+        .iter()
+        .map(|(_, constant)| layouter[constant.ty])
+        .collect::<Vec<_>>();
 
-    // eprintln!("{:#?}", module);
-    // eprintln!("{:?}", assemble(&const_layouts));
+    let (constants_buffer_layout, constants_buffer_offsets) = pack(&constant_layouts);
+    let mut constants_buffer = vec![0u8; constants_buffer_layout.size as usize];
 
-    let mut jit_module = jit::JITModule::new(
-        jit::JITBuilder::with_isa(isa.clone(), cranelift::module::default_libcall_names())
-    );
+    for (((_, constant), offset), layout) in module.constants.iter().zip(constants_buffer_offsets).zip(constant_layouts.iter()) {
+        build_constant(&mut constants_buffer[offset..(offset + layout.size as usize)], &module, &layouter, &module.global_expressions[constant.init], &module.types[constant.ty].inner);
+    }
+
+    // eprintln!("{:?}", constants_buffer);
 
     let constants_data_id = jit_module.declare_data("constants", cranelift::module::Linkage::Hidden, false, false)?;
     let mut constants_data_description = DataDescription::new();
 
-    constants_data_description.define_zeroinit(15);
-    constants_data_description.set_align(16);
+    // constants_data_description.define_zeroinit(15);
+    constants_data_description.define(constants_buffer.into_boxed_slice());
+    constants_data_description.set_align(constants_buffer_layout.alignment.round_up(1) as u64);
 
     jit_module.define_data(constants_data_id, &constants_data_description)?;
 
 
-    let mut layouter = naga::proc::Layouter::default();
-    layouter.update(module.to_ctx())?;
+    // Build context
 
     let module_context = crate::context::ModuleContext {
         config,
@@ -198,6 +213,8 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
         pointer_type: isa.pointer_type(),
     };
 
+
+    // Translate function
 
     let (func, func_sig) = crate::translate::translate_func(&module_context, &target.function, &target_info);
     cranelift::codegen::verify_function(&func, &flags)?;
@@ -227,7 +244,7 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
 }
 
 
-fn assemble(layouts: &[naga::proc::TypeLayout]) -> (naga::proc::TypeLayout, Vec<usize>) {
+fn pack(layouts: &[naga::proc::TypeLayout]) -> (naga::proc::TypeLayout, Vec<usize>) {
     let mut offsets = Vec::with_capacity(layouts.len());
     let mut offset = 0;
 

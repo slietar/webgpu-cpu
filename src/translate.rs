@@ -78,6 +78,20 @@ fn translate_expr(
     let (lane_count, vector_count) = module_context.config.compute_sizes(item_size);
 
     match expr {
+        naga::Expression::As { expr, kind, convert } => {
+            let values_raw = translate_expr(func_context, builder, block, &func_context.function.expressions[*expr], &func_context.function_info[*expr]); //.into_scalars(func_context, builder);
+            let input_type = module_context.resolve_inner_type(&func_context.function_info[*expr]);
+
+            match (input_type, expr_type) {
+                (
+                    naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Uint, width: 4 }),
+                    naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Sint, width: 4 })
+                )
+                    => values_raw,
+                _ => unimplemented!(),
+            }
+        },
+
 /*         naga::Expression::As { expr, kind, convert } => {
             let values = translate_expr(fn_builder, module, block, function, function_info, &function.expressions[*expr], &function_info[*expr], arg_offsets, global_var_map, config);
 
@@ -127,6 +141,10 @@ fn translate_expr(
                     ExprRepr::Constant(item, Some(types::F64X2))
                 },
                 naga::Literal::I32(v) => {
+                    let item = builder.ins().iconst(types::I32, *v as i64);
+                    ExprRepr::Constant(item, Some(types::I32X4))
+                },
+                naga::Literal::U32(v) => {
                     let item = builder.ins().iconst(types::I32, *v as i64);
                     ExprRepr::Constant(item, Some(types::I32X4))
                 },
@@ -224,8 +242,9 @@ fn translate_expr(
             let base_value = translate_expr(func_context, builder, block, &func_context.function.expressions[*base_handle], &func_context.function_info[*base_handle]).into_scalars(func_context, builder);
             let index_value = translate_expr(func_context, builder, block, &func_context.function.expressions[*index_handle], &func_context.function_info[*index_handle]).into_scalars(func_context, builder);
 
-            let item_type_handle = if let naga::TypeInner::Pointer { base, .. } = expr_type { base } else { unreachable!() };
-            let item_type_layout = module_context.layouter[*item_type_handle];
+            let base_pointer_type = module_context.resolve_inner_type(&func_context.function_info[*base_handle]);
+            let base_type_handle = if let naga::TypeInner::Pointer { base, .. } = base_pointer_type { base } else { unreachable!() };
+            let base_type = &module_context.module.types[*base_type_handle].inner;
 
             ExprRepr::Scalars(
                 base_value
@@ -233,7 +252,11 @@ fn translate_expr(
                     .zip(index_value.iter())
                     .map(|(base_scalar, index_scalar)| {
                         let index_scalar_i64 = builder.ins().uextend(types::I64, *index_scalar);
-                        let offset = builder.ins().imul_imm(index_scalar_i64, item_type_layout.size as i64);
+
+                        let offset = match base_type {
+                            naga::TypeInner::Array { stride, .. } => builder.ins().imul_imm(index_scalar_i64, *stride as i64),
+                            _ => todo!(),
+                        };
 
                         builder.ins().iadd(*base_scalar, offset)
                     })
@@ -244,14 +267,21 @@ fn translate_expr(
         naga::Expression::AccessIndex { base: base_handle, index } => {
             let base_value = translate_expr(func_context, builder, block, &func_context.function.expressions[*base_handle], &func_context.function_info[*base_handle]).into_scalars(func_context, builder);
 
-            let item_type_handle = if let naga::TypeInner::Pointer { base, .. } = expr_type { base } else { unreachable!() };
-            let item_type_layout = module_context.layouter[*item_type_handle];
+            let base_pointer_type = module_context.resolve_inner_type(&func_context.function_info[*base_handle]);
+            let base_type_handle = if let naga::TypeInner::Pointer { base, .. } = base_pointer_type { base } else { unreachable!() };
+            let base_type = &module_context.module.types[*base_type_handle].inner;
 
             ExprRepr::Scalars(
                 base_value
                     .iter()
                     .map(|base_scalar| {
-                        builder.ins().iadd_imm(*base_scalar, (index * item_type_layout.size) as i64)
+                        let offset = match base_type {
+                            naga::TypeInner::Array { stride, .. } => (stride * index),
+                            naga::TypeInner::Struct { members, .. } => members[*index as usize].offset,
+                            _ => todo!(),
+                        };
+
+                        builder.ins().iadd_imm(*base_scalar, offset as i64)
                     })
                     .collect::<Vec<_>>(),
                 None
@@ -260,10 +290,6 @@ fn translate_expr(
         naga::Expression::Constant(handle) => {
             let constants_pointer = builder.ins().global_value(module_context.pointer_type, func_context.constants_global_value);
             let constant_index = module_context.constant_map[handle];
-            // let constants_pointer = builder.block_params(block)[2];
-            // let x = builder.create_global_value(func_context.constants_global_value);
-
-            // eprintln!("> {:#?}", expr_type);
 
             let result_type = translate_primitive_type(expr_type);
 

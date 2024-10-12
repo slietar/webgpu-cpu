@@ -3,6 +3,7 @@ mod config;
 mod translate;
 mod context;
 mod types;
+mod constants;
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -20,7 +21,8 @@ fn main() {
 
     let pipeline = crate::jit::jit_compile("
         struct S {
-            x: f32,
+            x: u32,
+            y: f32,
         }
 
         override blockSize = 16;
@@ -28,7 +30,7 @@ fn main() {
         // const s : S = S { x: 2.0, y: 3.0 };
         // const h = array(2.0, 3.0, 3.0, 4.0);
         // const d : f32 = 4.0/2.0 + h[0];
-        // const e = vec3(1, 2, 3);
+        const s: S = S(1, 2);
         const c: f32 = 5;
         const d: f32 = 6;
         const e: i32 = 6;
@@ -36,22 +38,23 @@ fn main() {
         // @id(1200) override specular_param: f32 = d;
 
         // @group(0) @binding(0)
-        // var<storage, read> input: array<f32>;
+        // var<storage, read> input: array<u32>;
 
         @group(0) @binding(0)
-        var<storage, read_write> output: array<i32, 16>;
+        var<storage, read_write> output: array<S, 16>;
 
         // var<workgroup> x: array<f32, 16>;
 
         @compute
         @workgroup_size(1)
         fn main(@builtin(local_invocation_index) thread_id: u32) {
-            output[thread_id] = i32(thread_id);
+            output[thread_id].x = s.x + thread_id;
+            // output[thread_id].y = 3.0;
             // input[2] * 3.0 * f32(blockSize) * specular_param;
         }
     ", &config).unwrap();
 
-    let mut output_buffer = vec![0i32; 16];
+    let mut output_buffer = vec![0u32; 64];
 
     let bind_groups: &jit::BindGroups = &[
         jit::BindGroup { entries: &[output_buffer.as_mut_slice().into()] },

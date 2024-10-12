@@ -7,6 +7,6 @@ pub fn translate_primitive_type(input_type: &naga::TypeInner) -> ir::types::Type
         naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Float, width: 8 }) => ir::types::F64,
         naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Sint, width: 4 }) => ir::types::I32,
         naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Uint, width: 4 }) => ir::types::I32,
-        _ => unimplemented!(),
+        _ => panic!("Unsupported type {:?}", input_type),
     }
 }
