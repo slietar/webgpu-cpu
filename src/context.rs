@@ -6,16 +6,18 @@ use naga::proc::TypeResolution;
 use cranelift::codegen::ir;
 
 
-#[derive(Debug)]
-pub(crate) struct ModuleContext<'a> {
+pub(crate) struct ModuleContext<'a, 'b> {
     pub config: &'a Config,
+    pub constant_map: &'a HashMap<naga::Handle<naga::Constant>, usize>,
+    pub constants_data_id: cranelift::module::DataId,
+    pub cl_module: &'b mut dyn cranelift::module::Module,
     pub global_var_map: &'a HashMap<naga::Handle<naga::GlobalVariable>, usize>,
     pub module_info: &'a naga::valid::ModuleInfo,
     pub module: &'a naga::Module,
     pub pointer_type: ir::types::Type,
 }
 
-impl<'a> ModuleContext<'a> {
+impl<'a> ModuleContext<'a, '_> {
     pub fn translate_type(&self, shader_type: &naga::Type) -> (ir::types::Type, usize /* vector count */) {
         let item_size = get_type_item_size(&shader_type.inner);
 
@@ -49,10 +51,11 @@ pub fn get_type_item_size(shader_type: &naga::TypeInner) -> usize {
 }
 
 
-pub(crate) struct FunctionContext<'a> {
+pub(crate) struct FunctionContext<'a, 'b> {
     pub arg_offsets: &'a [usize],
-    pub builder: &'a mut cranelift::frontend::FunctionBuilder<'a>,
+    // pub builder: &'a mut cranelift::frontend::FunctionBuilder<'a>,
+    pub constants_global_value: ir::GlobalValue,
     pub function_info: &'a naga::valid::FunctionInfo,
     pub function: &'a naga::Function,
-    pub module: &'a ModuleContext<'a>,
+    pub module: &'a ModuleContext<'a, 'b>,
 }

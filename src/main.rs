@@ -2,21 +2,12 @@ mod jit;
 mod config;
 mod translate;
 mod context;
+mod types;
 
 use std::any::Any;
 use std::collections::HashMap;
 use std::io::Write as _;
 
-use codegen::ir;
-use cranelift::codegen::ir::types as types;
-use cranelift::prelude::*;
-use cranelift::jit::{JITBuilder, JITModule};
-use cranelift::codegen::ir::{AbiParam, Block, UserFuncName, Function, InstBuilder, Signature, Value};
-use cranelift::codegen::isa::CallConv;
-use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift::module::Module as _;
-use naga::proc::TypeResolution;
-use naga::ResourceBinding;
 use crate::config::Config;
 
 
@@ -28,17 +19,33 @@ fn main() {
     };
 
     let result = crate::jit::jit_compile("
-        @group(0) @binding(0)
-        var<storage, read> input: array<f32>;
+        // struct S {
+        //     x: f32,
+        //     y: f32,
+        // }
 
-        @group(0) @binding(1)
+        override blockSize = 16;
+
+        // const s : S = S { x: 2.0, y: 3.0 };
+        // const h = array(2.0, 3.0, 3.0, 4.0);
+        // const d : f32 = 4.0/2.0 + h[0];
+        // const e = vec3(1, 2, 3);
+        const c: f32 = 5;
+        const d: f32 = 6;
+
+        // @id(1200) override specular_param: f32 = d;
+
+        // @group(0) @binding(0)
+        // var<storage, read> input: array<f32>;
+
+        @group(0) @binding(0)
         var<storage, read_write> output: array<f32>;
 
-        var<workgroup> x: array<f32, 16>;
+        // var<workgroup> x: array<f32, 16>;
 
         fn main() {
             // let a = 2;
-            output[0] = input[2] * 3.0;
+            output[0] = c; // input[2] * 3.0 * f32(blockSize) * specular_param;
         }
     ", &config).unwrap();
 
