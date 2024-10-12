@@ -49,8 +49,10 @@ pub struct CompiledPipeline {
 
 impl CompiledPipeline {
     pub fn run(&self, thread_count: usize, bind_groups: &[BindGroup<'_>]) {
-        assert_eq!(thread_count % self.config.bandwidth_size, 0);
-        let subgroup_count = thread_count / self.config.bandwidth_size;
+        assert_eq!(thread_count % self.config.subgroup_width, 0);
+        let subgroup_count = thread_count / self.config.subgroup_width;
+
+        // eprintln!("subgroup_count: {}", subgroup_count);
 
         let mut builtins = RuntimeBuiltins {
             subgroup_id: 0,
@@ -91,6 +93,7 @@ impl CompiledPipeline {
     }
 }
 
+
 pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipeline, Box<dyn std::error::Error>> {
     // Parse and validate module
 
@@ -100,10 +103,10 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
         naga::valid::ValidationFlags::default(), naga::valid::Capabilities::default() | naga::valid::Capabilities::FLOAT64,
     ).validate(&module)?;
 
-    // eprintln!("{:#?}", module_info);
     let target = &module.entry_points[0];
     let target_info = module_info.get_entry_point(0);
-    // let target = module.entry_points[0].function;
+
+    eprintln!("{:#?}", target);
 
 
     // Build ISA
@@ -147,9 +150,6 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
     // eprintln!("{:?}", module.global_variables);
     // eprintln!("{:#?}", module.constants);
 
-    // let mut layouter = naga::proc::Layouter::default();
-    // layouter.update(module.to_ctx())?;
-
     // for (handle, constant) in module.constants.iter() {
     //     let ty = constant.ty;
     //     let x = layouter[ty];
@@ -183,12 +183,16 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
     jit_module.define_data(constants_data_id, &constants_data_description)?;
 
 
+    let mut layouter = naga::proc::Layouter::default();
+    layouter.update(module.to_ctx())?;
+
     let module_context = crate::context::ModuleContext {
         config,
         constant_map: &constant_map,
         constants_data_id,
         cl_module: &mut jit_module,
         global_var_map: &global_var_map,
+        layouter: &layouter,
         module_info: &module_info,
         module: &module,
         pointer_type: isa.pointer_type(),

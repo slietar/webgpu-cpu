@@ -13,8 +13,8 @@ use crate::types::translate_primitive_type;
 
 #[derive(Debug)]
 enum ExprRepr {
-    Constant(Value, ir::Type),
-    Scalars(Vec<Value>, ir::Type),
+    Constant(Value, Option<ir::Type>),
+    Scalars(Vec<Value>, Option<ir::Type>),
     Vectors(Vec<Value>),
 }
 
@@ -40,8 +40,8 @@ impl ExprRepr {
         let config = func_context.module.config;
 
         match self {
-            ExprRepr::Constant(value, ty) => vec![builder.ins().splat(ty, value); config.subgroup_width],
-            ExprRepr::Scalars(scalars, ty) => {
+            ExprRepr::Constant(value, Some(ty)) => vec![builder.ins().splat(ty, value); config.subgroup_width],
+            ExprRepr::Scalars(scalars, Some(ty)) => {
                 let vector_count = scalars.len();
                 let lane_count = config.subgroup_width / vector_count;
 
@@ -54,10 +54,10 @@ impl ExprRepr {
                 }).collect::<Vec<_>>()
             },
             ExprRepr::Vectors(vectors) => vectors,
+            _ => unreachable!(),
         }
     }
 }
-
 
 
 fn translate_expr(
@@ -74,7 +74,7 @@ fn translate_expr(
     // };
 
     let expr_type = module_context.resolve_inner_type(expr_info);
-    let item_size = crate::context::get_type_item_size(expr_type);
+    let item_size = module_context.get_type_item_size(expr_type);
     let (lane_count, vector_count) = module_context.config.compute_sizes(item_size);
 
     match expr {
@@ -120,14 +120,15 @@ fn translate_expr(
             match literal {
                 naga::Literal::F32(v) => {
                     let item = builder.ins().f32const(*v);
-                    ExprRepr::Constant(item, types::F32X4)
+                    ExprRepr::Constant(item, Some(types::F32X4))
                 },
                 naga::Literal::F64(v) => {
                     let item = builder.ins().f64const(*v);
-                    ExprRepr::Constant(item, types::F64X2)
-
-                    // let vector = fn_builder.ins().splat(types::F64X2, item);
-                    // vec![vector; vector_count]
+                    ExprRepr::Constant(item, Some(types::F64X2))
+                },
+                naga::Literal::I32(v) => {
+                    let item = builder.ins().iconst(types::I32, *v as i64);
+                    ExprRepr::Constant(item, Some(types::I32X4))
                 },
                 _ => {
                     panic!("unimplemented: {:?}", literal);
@@ -135,9 +136,38 @@ fn translate_expr(
             }
         },
         naga::Expression::FunctionArgument(arg) => {
-            let offset = func_context.arg_offsets[*arg as usize];
+            match func_context.arguments[*arg as usize] {
+                Argument::BuiltIn(builtin) => {
+                    let builtins_pointer = builder.block_params(block)[0];
 
-            ExprRepr::Vectors(builder.block_params(block)[offset..(offset + vector_count)].to_vec())
+                    match builtin {
+                        naga::BuiltIn::LocalInvocationIndex => {
+                            let subgroup_index = builder.ins().load(types::I32, ir::MemFlags::new(), builtins_pointer, 0);
+                            let first_subgroup_thread_index = builder.ins().imul_imm(subgroup_index, module_context.config.subgroup_width as i64);
+
+                            ExprRepr::Scalars(
+                                (0..func_context.module.config.subgroup_width)
+                                    .map(|index| {
+                                        builder.ins().iadd_imm(first_subgroup_thread_index, index as i64)
+                                    })
+                                    .collect::<Vec<_>>(),
+                                Some(types::I32X4),
+                            )
+                        },
+                        naga::BuiltIn::SubgroupId => {
+                            ExprRepr::Constant(
+                                builder.ins().load(types::I32, ir::MemFlags::new(), builtins_pointer, 0),
+                                Some(types::I32X4),
+                            )
+                        },
+                        _ => unreachable!(),
+                    }
+                },
+                Argument::Regular(offset) => {
+                    let scalar = builder.block_params(block)[offset];
+                    ExprRepr::Scalars(vec![scalar; vector_count], None)
+                },
+            }
         },
         naga::Expression::Binary { op, left, right } => {
             let left_values = translate_expr(func_context, builder, block, &func_context.function.expressions[*left], &func_context.function_info[*left]).into_vectors(func_context, builder);
@@ -190,26 +220,42 @@ fn translate_expr(
                 types::F32X4,
             )
         }, */
+        naga::Expression::Access { base: base_handle, index: index_handle } => {
+            let base_value = translate_expr(func_context, builder, block, &func_context.function.expressions[*base_handle], &func_context.function_info[*base_handle]).into_scalars(func_context, builder);
+            let index_value = translate_expr(func_context, builder, block, &func_context.function.expressions[*index_handle], &func_context.function_info[*index_handle]).into_scalars(func_context, builder);
+
+            let item_type_handle = if let naga::TypeInner::Pointer { base, .. } = expr_type { base } else { unreachable!() };
+            let item_type_layout = module_context.layouter[*item_type_handle];
+
+            ExprRepr::Scalars(
+                base_value
+                    .iter()
+                    .zip(index_value.iter())
+                    .map(|(base_scalar, index_scalar)| {
+                        let index_scalar_i64 = builder.ins().uextend(types::I64, *index_scalar);
+                        let offset = builder.ins().imul_imm(index_scalar_i64, item_type_layout.size as i64);
+
+                        builder.ins().iadd(*base_scalar, offset)
+                    })
+                    .collect::<Vec<_>>(),
+                None
+            )
+        },
         naga::Expression::AccessIndex { base: base_handle, index } => {
-            // let base = &function.expressions[*base_handle];
-            // let base_info = &function_info[*base_handle];
+            let base_value = translate_expr(func_context, builder, block, &func_context.function.expressions[*base_handle], &func_context.function_info[*base_handle]).into_scalars(func_context, builder);
 
-            let base_pointer_value = match func_context.function.expressions[*base_handle] {
-                naga::Expression::GlobalVariable(global_var_handle) => {
-                    let global_var_index = module_context.global_var_map[&global_var_handle];
-                    let global_vars_pointer = builder.block_params(block)[1];
+            let item_type_handle = if let naga::TypeInner::Pointer { base, .. } = expr_type { base } else { unreachable!() };
+            let item_type_layout = module_context.layouter[*item_type_handle];
 
-                    builder.ins().load(
-                        module_context.pointer_type,
-                        ir::MemFlags::new(),
-                        global_vars_pointer,
-                        (global_var_index as i32) * (module_context.pointer_type.bytes() as i32)
-                    )
-                },
-                _ => todo!(),
-            };
-
-            ExprRepr::Constant(builder.ins().iadd_imm(base_pointer_value, (index * 1u32 /* TODO: Change */) as i64), types::I64X2)
+            ExprRepr::Scalars(
+                base_value
+                    .iter()
+                    .map(|base_scalar| {
+                        builder.ins().iadd_imm(*base_scalar, (index * item_type_layout.size) as i64)
+                    })
+                    .collect::<Vec<_>>(),
+                None
+            )
         },
         naga::Expression::Constant(handle) => {
             let constants_pointer = builder.ins().global_value(module_context.pointer_type, func_context.constants_global_value);
@@ -228,27 +274,30 @@ fn translate_expr(
                     constants_pointer,
                     (constant_index as i32) * (module_context.pointer_type.bytes() as i32)
                 ),
-                result_type,
+                Some(result_type),
             )
-
-            // ExprRepr::Constant(func_context.constants_global_value, expr_type)
         },
-        // naga::Expression::GlobalVariable(handle) => {
-        //     let offset = global_var_map[handle];
-        //     // let global_var = module.global_variables.try_get(*handle).unwrap();
+        naga::Expression::GlobalVariable(global_var_handle) => {
+            let global_var_index = module_context.global_var_map[global_var_handle];
+            let global_vars_pointer = builder.block_params(block)[1];
 
-        //     // global_var.ty
-        //     // let expr_type = resolve_inner_type(module, expr_info);
-        //     // let item_size = get_type_item_size(expr_type);
-        //     // let (lane_count, vector_count) = compute_sizes(item_size, config);
-
-        //     ExprRepr::Constant(fn_builder.block_params(block)[offset], POINTER_TYPE)
-        //     // ExprRepr::Vectors(fn_builder.block_params(block)[offset..(offset + vector_count)].to_vec())
-        // },
+            ExprRepr::Constant(builder.ins().load(
+                module_context.pointer_type,
+                ir::MemFlags::new(),
+                global_vars_pointer,
+                (global_var_index as i32) * (module_context.pointer_type.bytes() as i32)
+            ), Some(types::F32X4))
+        },
         _ => {
             panic!("unimplemented: {:?}", expr);
         },
     }
+}
+
+
+pub(crate) enum Argument {
+    BuiltIn(naga::BuiltIn),
+    Regular(usize),
 }
 
 pub fn translate_func(
@@ -263,24 +312,30 @@ pub fn translate_func(
 
     // Parameters
 
-    let mut arg_offsets = Vec::new();
-
     // Pointer to builtins
     cl_signature.params.push(AbiParam::new(module_context.pointer_type));
 
     // Pointer to global variables
     cl_signature.params.push(AbiParam::new(module_context.pointer_type));
 
-    // for arg in function.arguments.iter() {
-    //     let shader_type = &module_context.module.types[arg.ty];
-    //     let (cl_type, cl_type_count) = module_context.translate_type(shader_type);
 
-    //     arg_offsets.push(cl_signature.params.len());
+    let mut arguments = Vec::with_capacity(function.arguments.len());
 
-    //     for _ in 0..cl_type_count {
-    //         cl_signature.params.push(AbiParam::new(cl_type));
-    //     }
-    // }
+    for arg in function.arguments.iter() {
+        let shader_type = &module_context.module.types[arg.ty];
+        let (cl_type, cl_type_count) = module_context.translate_type(shader_type);
+
+        match arg.binding {
+            Some(naga::Binding::BuiltIn(built_in)) => {
+                arguments.push(Argument::BuiltIn(built_in));
+            },
+            Some(_) => unreachable!(),
+            None => {
+                arguments.push(Argument::Regular(cl_signature.params.len()));
+                cl_signature.params.push(AbiParam::new(cl_type));
+            },
+        }
+    }
 
 
     // Return values
@@ -312,7 +367,7 @@ pub fn translate_func(
 
 
     let func_context = FunctionContext {
-        arg_offsets: &arg_offsets,
+        arguments: &arguments,
         constants_global_value,
         module: module_context,
         function,
