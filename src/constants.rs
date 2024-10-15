@@ -15,7 +15,10 @@ pub fn build_constant(buffer: &mut [u8], module: &naga::Module, layouter: &naga:
                 naga::TypeInner::Struct { ref members, span } => {
                     for (member_index, (member, component)) in members.iter().zip(components.iter()).enumerate() {
                         let start_offset = member.offset as usize;
-                        let end_offset = members.get(member_index + 1).map(|member| member.offset).unwrap_or(*span) as usize;
+                        let end_offset = members
+                            .get(member_index + 1)
+                            .map(|member| member.offset)
+                            .unwrap_or(*span) as usize;
 
                         build_constant(&mut buffer[start_offset..end_offset], module, layouter, &module.global_expressions[*component], &module.types[member.ty].inner);
                     }

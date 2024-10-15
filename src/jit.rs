@@ -157,7 +157,7 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
 
     // eprintln!("{:?}", sorted_bounded_global_variables);
     // eprintln!("{:?}", module.global_variables);
-    // eprintln!("{:#?}", module.constants);
+    // eprintln!("{:#?}", module);
 
     // for (handle, constant) in module.constants.iter() {
     //     let ty = constant.ty;
@@ -206,6 +206,7 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
         constant_map: &constant_map,
         constants_data_id,
         cl_module: &mut jit_module,
+        frontend_config: &isa.frontend_config(),
         global_var_map: &global_var_map,
         layouter: &layouter,
         module_info: &module_info,
@@ -216,7 +217,7 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
 
     // Translate function
 
-    let (func, func_sig) = crate::translate::translate_func(&module_context, &target.function, &target_info);
+    let (func, func_sig) = crate::translate::translate_func(&module_context, &target.function, &target_info)?;
     cranelift::codegen::verify_function(&func, &flags)?;
 
     let mut func_ctx = cranelift::codegen::Context::for_function(func);
@@ -244,7 +245,7 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
 }
 
 
-fn pack(layouts: &[naga::proc::TypeLayout]) -> (naga::proc::TypeLayout, Vec<usize>) {
+pub(crate) fn pack(layouts: &[naga::proc::TypeLayout]) -> (naga::proc::TypeLayout, Vec<usize>) {
     let mut offsets = Vec::with_capacity(layouts.len());
     let mut offset = 0;
 

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::config::Config;
 use naga::proc::TypeResolution;
 // use cranelift::prelude::Configurable;
-use cranelift::codegen::ir;
+use cranelift::{codegen::ir, prelude::isa};
 
 
 pub(crate) struct ModuleContext<'a, 'b> {
@@ -11,6 +11,7 @@ pub(crate) struct ModuleContext<'a, 'b> {
     pub constant_map: &'a HashMap<naga::Handle<naga::Constant>, usize>,
     pub constants_data_id: cranelift::module::DataId,
     pub cl_module: &'b mut dyn cranelift::module::Module,
+    pub frontend_config: &'a isa::TargetFrontendConfig,
     pub global_var_map: &'a HashMap<naga::Handle<naga::GlobalVariable>, usize>,
     pub layouter: &'a naga::proc::Layouter,
     pub module_info: &'a naga::valid::ModuleInfo,
@@ -30,12 +31,12 @@ impl<'a> ModuleContext<'a, '_> {
         }
     }
 
-    pub fn translate_type(&self, shader_type: &naga::Type) -> (ir::types::Type, usize /* vector count */) {
-        let item_size = self.get_type_item_size(&shader_type.inner);
+    pub fn translate_type(&self, shader_type: &naga::TypeInner) -> (ir::types::Type, usize /* vector count */) {
+        let item_size = self.get_type_item_size(shader_type);
 
         let (lane_count, vector_count) = self.config.compute_sizes(item_size);
 
-        let cl_type = match (&shader_type.inner, lane_count) {
+        let cl_type = match (shader_type, lane_count) {
             (naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Float, width: 4 }), 4) => ir::types::F32X4,
             (naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Float, width: 8 }), 2) => ir::types::F64X2,
             (naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Sint, width: 4 }), 4) => ir::types::I32X4,
@@ -61,6 +62,9 @@ pub(crate) struct FunctionContext<'a, 'b> {
     pub emitted_exprs: HashMap<naga::Handle<naga::Expression>, crate::translate::ExprRepr>,
     pub function_info: &'a naga::valid::FunctionInfo,
     pub function: &'a naga::Function,
+    // pub local_variable_slots: HashMap<naga::Handle<naga::LocalVariable>, ir::StackSlot>,
+    pub local_var_offsets: HashMap<naga::Handle<naga::LocalVariable>, usize>,
+    pub local_var_slot: Option<ir::StackSlot>,
     pub module: &'a ModuleContext<'a, 'b>,
 }
 

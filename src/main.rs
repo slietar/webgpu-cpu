@@ -9,6 +9,8 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::io::Write as _;
 
+use cranelift::codegen::verifier::VerifierErrors;
+
 use crate::config::Config;
 
 
@@ -19,13 +21,13 @@ fn main() {
         subgroup_width: 4,
     };
 
-    let pipeline = crate::jit::jit_compile("
+    let pipeline_result = crate::jit::jit_compile("
         struct S {
-            x: i32,
-            y: i32,
+            x: f32,
+            y: f32,
         }
 
-        override blockSize = 16;
+        override blockSize = 16.0;
 
         // const s : S = S { x: 2.0, y: 3.0 };
         // const h = array(2.0, 3.0, 3.0, 4.0);
@@ -41,20 +43,57 @@ fn main() {
         // var<storage, read> input: array<u32>;
 
         @group(0) @binding(0)
-        var<storage, read_write> output: array<S, 16>;
+        var<storage, read_write> output: array<f32, 16>;
 
         // var<workgroup> x: array<f32, 16>;
+
+        // fn foo(a: array<S, 4>) -> i32 {
+        //     // let b = array(S(1, 2), S(3, 4), S(5, 6), S(7, 8));
+        //     // a[0].x = 3;
+
+        //     return (*a)[0].x;
+        // }
 
         @compute
         @workgroup_size(1)
         fn main(@builtin(local_invocation_index) thread_id: u32) {
-            output[thread_id].x = s.y * i32(thread_id);
+            // var a = 3.0;
+
+            // var b: i32 = 0;
+            // a = 5.0;
+
+            var a = blockSize; // + output[thread_id];
+
+            // a = 4.0;
+            // a += d;
+            output[thread_id] = a;
+
+            // foo(array(S(1, 2), S(3, 4), S(5, 6), S(7, 8)));
+            // let a = array(S(1, 2), S(3, 4), S(5, 6), S(7, 8));
+            // foo(&a[0]);
+
+            // output[thread_id].x = s.y * i32(thread_id);
             // output[thread_id].y = 3.0;
             // input[2] * 3.0 * f32(blockSize) * specular_param;
         }
-    ", &config).unwrap();
+    ", &config);
 
-    let mut output_buffer = vec![0u32; 64];
+    let pipeline = match pipeline_result {
+        Ok(pipeline) => pipeline,
+        Err(err) => {
+            if let Some(VerifierErrors(errors)) = err.downcast_ref::<VerifierErrors>() {
+                for err in errors {
+                    eprintln!("Error: {:?}", err);
+                }
+            } else {
+                eprintln!("Error: {:?}", err);
+            }
+
+            return;
+        }
+    };
+
+    let mut output_buffer = vec![0f32; 64];
 
     let bind_groups: &jit::BindGroups = &[
         jit::BindGroup { entries: &[output_buffer.as_mut_slice().into()] },

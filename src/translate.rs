@@ -6,9 +6,9 @@ use cranelift::prelude::*;
 use cranelift::codegen::ir::{AbiParam, Block, UserFuncName, Function, InstBuilder, Signature, Value};
 use cranelift::codegen::isa::CallConv;
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext};
-use naga::ResourceBinding;
+use naga::proc::Alignment;
 use crate::context::{FunctionContext, ModuleContext};
-use crate::types::translate_primitive_type;
+use crate::types::{translate_alignment, translate_primitive_type};
 
 
 #[derive(Clone, Debug)]
@@ -184,8 +184,8 @@ pub(crate) fn translate_expr(
             }
         },
         naga::Expression::Binary { op, left: left_handle, right: right_handle } => {
-            let left_values = func_context.get_expr(*left_handle, builder, block).into_scalars(func_context, builder);
-            let right_values = func_context.get_expr(*right_handle, builder, block).into_scalars(func_context, builder);
+            let left_values = func_context.get_expr(*left_handle, builder, block).into_vectors(func_context, builder);
+            let right_values = func_context.get_expr(*right_handle, builder, block).into_vectors(func_context, builder);
 
             ExprRepr::Vectors(
                 (0..vector_count).map(|vector_index| {
@@ -241,22 +241,19 @@ pub(crate) fn translate_expr(
                 _ => unimplemented!(),
             }
         }, */
-/*         naga::Expression::Load { pointer: pointer_handle } => {
-            let pointer = translate_expr(fn_builder, module, block, function, function_info, &function.expressions[*pointer_handle], &function_info[*pointer_handle], arg_offsets, global_var_map, config);
-            let pointer_scalars = pointer.into_scalars(fn_builder, config);
-
-            // let pointer_offset = match pointer {
-            //     ExprRepr::Constant(value, _) => value,
-            //     _ => unreachable!(),
-            // };
+        naga::Expression::Load { pointer: pointer_handle } => {
+            let pointer = func_context.get_expr(*pointer_handle, builder, block).into_scalars(func_context, builder);
 
             ExprRepr::Scalars(
-                pointer_scalars.iter().map(|pointer_offset| {
-                    fn_builder.ins().load(types::F32, ir::MemFlags::new(), *pointer_offset, 0)
-                }).collect::<Vec<_>>(),
-                types::F32X4,
+                pointer
+                    .iter()
+                    .map(|item_pointer| {
+                        builder.ins().load(translate_primitive_type(expr_type), ir::MemFlags::new(), *item_pointer, 0)
+                    })
+                    .collect::<Vec<_>>(),
+                Some(module_context.translate_type(expr_type).0),
             )
-        }, */
+        },
         naga::Expression::Access { base: base_handle, index: index_handle } => {
             let base_value = func_context.get_expr(*base_handle, builder, block).into_scalars(func_context, builder);
             let index_value = func_context.get_expr(*index_handle, builder, block).into_scalars(func_context, builder);
@@ -310,16 +307,14 @@ pub(crate) fn translate_expr(
             let constants_pointer = builder.ins().global_value(module_context.pointer_type, func_context.constants_global_value);
             let constant_index = module_context.constant_map[handle];
 
-            let result_type = translate_primitive_type(expr_type);
-
             ExprRepr::Constant(
                 builder.ins().load(
-                    result_type,
+                    translate_primitive_type(expr_type),
                     ir::MemFlags::new(),
                     constants_pointer,
                     (constant_index as i32) * (module_context.pointer_type.bytes() as i32)
                 ),
-                Some(result_type),
+                Some(module_context.translate_type(expr_type).0),
             )
         },
         naga::Expression::GlobalVariable(global_var_handle) => {
@@ -332,6 +327,16 @@ pub(crate) fn translate_expr(
                 global_vars_pointer,
                 (global_var_index as i32) * (module_context.pointer_type.bytes() as i32)
             ), Some(types::F32X4))
+        },
+        naga::Expression::LocalVariable(handle) => {
+            // let slot = func_context.local_variable_slots.get(handle).unwrap();
+            let slot = func_context.local_var_slot.unwrap();
+            let offset = func_context.local_var_offsets[handle];
+
+            ExprRepr::Constant(
+                builder.ins().stack_addr(module_context.pointer_type, slot, offset as i32),
+                None,
+            )
         },
         _ => {
             panic!("unimplemented: {:?}", expr);
@@ -349,7 +354,7 @@ pub fn translate_func(
     module_context: &ModuleContext<'_, '_>,
     function: &naga::Function,
     function_info: &naga::valid::FunctionInfo,
-) -> (cranelift::codegen::ir::Function, Signature) {
+) -> Result<(cranelift::codegen::ir::Function, Signature), Box<dyn std::error::Error>> {
     // General
 
     let mut cl_signature = Signature::new(CallConv::Fast);
@@ -367,7 +372,7 @@ pub fn translate_func(
     let mut arguments = Vec::with_capacity(function.arguments.len());
 
     for arg in function.arguments.iter() {
-        let shader_type = &module_context.module.types[arg.ty];
+        let shader_type = &module_context.module.types[arg.ty].inner;
         let (cl_type, cl_type_count) = module_context.translate_type(shader_type);
 
         match arg.binding {
@@ -386,7 +391,7 @@ pub fn translate_func(
     // Return values
 
     if let Some(result) = &function.result {
-        let shader_type = &module_context.module.types[result.ty];
+        let shader_type = &module_context.module.types[result.ty].inner;
         let (cl_type, cl_type_count) = module_context.translate_type(shader_type);
 
         for _ in 0..cl_type_count {
@@ -394,22 +399,105 @@ pub fn translate_func(
         }
     }
 
-    // cl_signature.params.push(AbiParam::new(module_context.pointer_type));
+
+    // Function
+
+    let mut cl_func = Function::with_name_signature(UserFuncName::user(0, 0), cl_signature.clone());
+
+    let constants_global_value = module_context.cl_module.declare_data_in_func(module_context.constants_data_id, &mut cl_func);
 
 
     // Builder
 
     let mut cl_fn_builder_ctx = FunctionBuilderContext::new();
-    let mut cl_func = Function::with_name_signature(UserFuncName::user(0, 0), cl_signature.clone());
-
-    let constants_global_value = module_context.cl_module.declare_data_in_func(module_context.constants_data_id, &mut cl_func);
-
     let mut builder = FunctionBuilder::new(&mut cl_func, &mut cl_fn_builder_ctx);
-    let block = builder.create_block();
+    let root_block = builder.create_block();
 
-    builder.append_block_params_for_function_params(block);
-    builder.switch_to_block(block);
+    builder.append_block_params_for_function_params(root_block);
+    builder.switch_to_block(root_block);
 
+
+    // Local variables
+
+    let (local_var_slot, local_var_offsets) = if !function.local_variables.is_empty() {
+        let mut init_handles = Vec::new();
+        let mut uninit_handles = Vec::new();
+
+        for (local_var_handle, local_var) in function.local_variables.iter() {
+            if let Some(init_handle) = local_var.init {
+                init_handles.push(local_var_handle);
+            } else {
+                uninit_handles.push(local_var_handle);
+            }
+        }
+
+        let all_handles = init_handles.iter().copied().chain(uninit_handles.into_iter()).collect::<Vec<_>>();
+
+        let all_layouts = all_handles
+            .iter()
+            .map(|handle| module_context.layouter[function.local_variables[*handle].ty])
+            .collect::<Vec<_>>();
+
+        let (layout, offsets) = crate::jit::pack(&all_layouts[..]);
+        let translated_alignment = translate_alignment(layout.alignment);
+
+        let slot = builder.create_sized_stack_slot(StackSlotData {
+            align_shift: translated_alignment,
+            kind: StackSlotKind::ExplicitSlot,
+            size: layout.size as u32,
+        });
+
+        let offsets_map = all_handles.into_iter().zip(offsets.into_iter()).collect::<HashMap<_, _>>();
+
+        if !init_handles.is_empty() {
+            let init_size = offsets[init_handles.len() - 1] + all_layouts[init_handles.len() - 1].size as usize;
+            let mut init_buffer = vec![0u8; init_size as usize];
+            // eprintln!("{:?}", init_size);
+
+            for (init_handle, (&offset, item_layout)) in init_handles.iter().zip(offsets.iter().zip(all_layouts.iter())) {
+                let local_variable = &function.local_variables[*init_handle];
+
+                crate::constants::build_constant(
+                    &mut init_buffer[offset..(offset + item_layout.size as usize)],
+                    module_context.module,
+                    module_context.layouter,
+                    &function.expressions[local_variable.init.unwrap()],
+                    &module_context.module.types[local_variable.ty].inner
+                );
+            }
+
+            let data_id = module_context.cl_module.declare_data("localvar", cranelift::module::Linkage::Hidden, false, false)?;
+            let mut data_description = cranelift::module::DataDescription::new();
+
+            data_description.define(init_buffer.into_boxed_slice());
+            data_description.set_align(layout.alignment.round_up(1) as u64);
+
+            module_context.cl_module.define_data(data_id, &data_description).unwrap();
+
+            let global_value = module_context.cl_module.declare_data_in_func(module_context.constants_data_id, &mut cl_func);
+
+            let src_pointer = builder.ins().global_value(module_context.pointer_type, global_value);
+            let dest_pointer = builder.ins().stack_addr(module_context.pointer_type, slot, 0);
+
+            builder.emit_small_memory_copy(
+                *module_context.frontend_config,
+                dest_pointer,
+                src_pointer,
+                init_size as u64,
+                translated_alignment,
+                translated_alignment,
+                true,
+                MemFlags::new(),
+            );
+        }
+
+        (Some(slot), offsets_map)
+    } else {
+        (None, HashMap::new())
+    };
+
+
+    // Context
 
     let mut func_context = FunctionContext {
         arguments: &arguments,
@@ -417,16 +505,20 @@ pub fn translate_func(
         emitted_exprs: HashMap::new(),
         function_info,
         function,
+        // local_variable_slots: HashMap::new(),
+        local_var_offsets,
+        local_var_slot,
         module: module_context,
     };
 
-    // eprintln!("{:#?}", function);
+
+    // Statements
 
     for stat in function.body.iter() {
         match stat {
             naga::Statement::Store { pointer: pointer_handle, value: value_handle } => {
-                let pointer = func_context.get_expr(*pointer_handle, &mut builder, block);
-                let value = func_context.get_expr(*value_handle, &mut builder, block);
+                let pointer = func_context.get_expr(*pointer_handle, &mut builder, root_block);
+                let value = func_context.get_expr(*value_handle, &mut builder, root_block);
 
                 // eprintln!("Pointer = {:#?}", pointer);
                 // eprintln!("Value = {:#?}", value);
@@ -451,7 +543,7 @@ pub fn translate_func(
                         let expr = &function.expressions[expr_handle];
                         let expr_info = &function_info[expr_handle];
 
-                        func_context.emitted_exprs.insert(expr_handle, translate_expr(&func_context, &mut builder, block, expr, expr_info));
+                        func_context.emitted_exprs.insert(expr_handle, translate_expr(&func_context, &mut builder, root_block, expr, expr_info));
                     }
                 }
             },
@@ -469,5 +561,5 @@ pub fn translate_func(
 
     eprintln!("-- OUTPUT --------------------------------------------------------\n{:#?}", cl_func);
 
-    (cl_func, cl_signature)
+    Ok((cl_func, cl_signature))
 }
