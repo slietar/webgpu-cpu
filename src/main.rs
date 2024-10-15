@@ -21,8 +21,8 @@ fn main() {
 
     let pipeline = crate::jit::jit_compile("
         struct S {
-            x: u32,
-            y: f32,
+            x: i32,
+            y: i32,
         }
 
         override blockSize = 16;
@@ -48,7 +48,7 @@ fn main() {
         @compute
         @workgroup_size(1)
         fn main(@builtin(local_invocation_index) thread_id: u32) {
-            output[thread_id].x = s.x + thread_id;
+            output[thread_id].x = s.y * i32(thread_id);
             // output[thread_id].y = 3.0;
             // input[2] * 3.0 * f32(blockSize) * specular_param;
         }

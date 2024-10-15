@@ -197,11 +197,34 @@ fn translate_expr(
                     let left = left_values[vector_index];
                     let right = right_values[vector_index];
 
-                    match op {
-                        naga::BinaryOperator::Add => ins.fadd(left, right),
-                        naga::BinaryOperator::Subtract => ins.fsub(left, right),
-                        naga::BinaryOperator::Multiply => ins.fmul(left, right),
-                        naga::BinaryOperator::Divide => ins.fdiv(left, right),
+                    match expr_type {
+                        naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Float, .. }) => {
+                            match op {
+                                naga::BinaryOperator::Add => ins.fadd(left, right),
+                                naga::BinaryOperator::Subtract => ins.fsub(left, right),
+                                naga::BinaryOperator::Multiply => ins.fmul(left, right),
+                                naga::BinaryOperator::Divide => ins.fdiv(left, right),
+                                _ => unimplemented!(),
+                            }
+                        },
+                        naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Sint, .. }) => {
+                            match op {
+                                naga::BinaryOperator::Add => ins.iadd(left, right),
+                                naga::BinaryOperator::Subtract => ins.isub(left, right),
+                                naga::BinaryOperator::Multiply => ins.imul(left, right),
+                                // naga::BinaryOperator::Divide => ins.sdiv(left, right),
+                                _ => unimplemented!(),
+                            }
+                        },
+                        naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Uint, .. }) => {
+                            match op {
+                                naga::BinaryOperator::Add => ins.uadd_sat(left, right),
+                                naga::BinaryOperator::Subtract => ins.usub_sat(left, right),
+                                naga::BinaryOperator::Multiply => ins.umulhi(left, right),
+                                naga::BinaryOperator::Divide => ins.udiv(left, right),
+                                _ => unimplemented!(),
+                            }
+                        },
                         _ => unimplemented!(),
                     }
                 }).collect::<Vec<_>>()
