@@ -62,7 +62,7 @@ fn main() {
             // var b: i32 = 0;
             // a = 5.0;
 
-            var a = blockSize; // + output[thread_id];
+            var a = 3.0; // + output[thread_id];
 
             // a = 4.0;
             // a += d;

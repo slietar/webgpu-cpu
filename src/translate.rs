@@ -329,7 +329,6 @@ pub(crate) fn translate_expr(
             ), Some(types::F32X4))
         },
         naga::Expression::LocalVariable(handle) => {
-            // let slot = func_context.local_variable_slots.get(handle).unwrap();
             let slot = func_context.local_var_slot.unwrap();
             let offset = func_context.local_var_offsets[handle];
 
@@ -420,25 +419,13 @@ pub fn translate_func(
     // Local variables
 
     let (local_var_slot, local_var_offsets) = if !function.local_variables.is_empty() {
-        let mut init_handles = Vec::new();
-        let mut uninit_handles = Vec::new();
-
-        for (local_var_handle, local_var) in function.local_variables.iter() {
-            if let Some(init_handle) = local_var.init {
-                init_handles.push(local_var_handle);
-            } else {
-                uninit_handles.push(local_var_handle);
-            }
-        }
-
-        let all_handles = init_handles.iter().copied().chain(uninit_handles.into_iter()).collect::<Vec<_>>();
-
-        let all_layouts = all_handles
+        let (handles, layouts) = function.local_variables
             .iter()
-            .map(|handle| module_context.layouter[function.local_variables[*handle].ty])
-            .collect::<Vec<_>>();
+            .map(|(handle, local_var)| (handle, module_context.layouter[local_var.ty]))
+            .unzip::<_, _, Vec<_>, Vec<_>>();
+            // .collect::<Vec<_>>();
 
-        let (layout, offsets) = crate::jit::pack(&all_layouts[..]);
+        let (layout, offsets) = crate::jit::pack(&layouts);
         let translated_alignment = translate_alignment(layout.alignment);
 
         let slot = builder.create_sized_stack_slot(StackSlotData {
@@ -447,51 +434,9 @@ pub fn translate_func(
             size: layout.size as u32,
         });
 
-        let offsets_map = all_handles.into_iter().zip(offsets.into_iter()).collect::<HashMap<_, _>>();
+        let offset_map = handles.into_iter().zip(offsets).collect::<HashMap<_, _>>();
 
-        if !init_handles.is_empty() {
-            let init_size = offsets[init_handles.len() - 1] + all_layouts[init_handles.len() - 1].size as usize;
-            let mut init_buffer = vec![0u8; init_size as usize];
-            // eprintln!("{:?}", init_size);
-
-            for (init_handle, (&offset, item_layout)) in init_handles.iter().zip(offsets.iter().zip(all_layouts.iter())) {
-                let local_variable = &function.local_variables[*init_handle];
-
-                crate::constants::build_constant(
-                    &mut init_buffer[offset..(offset + item_layout.size as usize)],
-                    module_context.module,
-                    module_context.layouter,
-                    &function.expressions[local_variable.init.unwrap()],
-                    &module_context.module.types[local_variable.ty].inner
-                );
-            }
-
-            let data_id = module_context.cl_module.declare_data("localvar", cranelift::module::Linkage::Hidden, false, false)?;
-            let mut data_description = cranelift::module::DataDescription::new();
-
-            data_description.define(init_buffer.into_boxed_slice());
-            data_description.set_align(layout.alignment.round_up(1) as u64);
-
-            module_context.cl_module.define_data(data_id, &data_description).unwrap();
-
-            let global_value = module_context.cl_module.declare_data_in_func(module_context.constants_data_id, &mut cl_func);
-
-            let src_pointer = builder.ins().global_value(module_context.pointer_type, global_value);
-            let dest_pointer = builder.ins().stack_addr(module_context.pointer_type, slot, 0);
-
-            builder.emit_small_memory_copy(
-                *module_context.frontend_config,
-                dest_pointer,
-                src_pointer,
-                init_size as u64,
-                translated_alignment,
-                translated_alignment,
-                true,
-                MemFlags::new(),
-            );
-        }
-
-        (Some(slot), offsets_map)
+        (Some(slot), offset_map)
     } else {
         (None, HashMap::new())
     };
@@ -512,6 +457,27 @@ pub fn translate_func(
     };
 
 
+    // Initialize local variables
+
+    if function.local_variables.iter().any(|(_, local_var)| local_var.init.is_some()) {
+        let slot = func_context.local_var_slot.unwrap();
+        let pointer = builder.ins().stack_addr(module_context.pointer_type, slot, 0 as i32);
+
+        for (handle, local_var) in function.local_variables.iter() {
+            if let Some(init_handle) = local_var.init {
+                let offset = func_context.local_var_offsets[&handle];
+                let value_repr = func_context.get_expr(init_handle, &mut builder, root_block);
+
+                if let ExprRepr::Constant(value, _) = value_repr {
+                    builder.ins().store(ir::MemFlags::new(), value, pointer, offset as i32);
+                } else {
+                    panic!("unimplemented: {:?}", value_repr);
+                }
+            }
+        }
+    }
+
+
     // Statements
 
     for stat in function.body.iter() {
@@ -519,9 +485,6 @@ pub fn translate_func(
             naga::Statement::Store { pointer: pointer_handle, value: value_handle } => {
                 let pointer = func_context.get_expr(*pointer_handle, &mut builder, root_block);
                 let value = func_context.get_expr(*value_handle, &mut builder, root_block);
-
-                // eprintln!("Pointer = {:#?}", pointer);
-                // eprintln!("Value = {:#?}", value);
 
                 let pointer_scalars = pointer.into_scalars(&func_context, &mut builder);
                 let value_scalars = value.into_scalars(&func_context, &mut builder);
