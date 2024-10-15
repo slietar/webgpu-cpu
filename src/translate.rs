@@ -11,8 +11,8 @@ use crate::context::{FunctionContext, ModuleContext};
 use crate::types::translate_primitive_type;
 
 
-#[derive(Debug)]
-enum ExprRepr {
+#[derive(Clone, Debug)]
+pub enum ExprRepr {
     Constant(Value, Option<ir::Type>),
     Scalars(Vec<Value>, Option<ir::Type>),
     Vectors(Vec<Value>),
@@ -60,7 +60,7 @@ impl ExprRepr {
 }
 
 
-fn translate_expr(
+pub(crate) fn translate_expr(
     func_context: &FunctionContext,
     builder: &mut FunctionBuilder<'_>,
     block: Block,
@@ -68,19 +68,15 @@ fn translate_expr(
     expr_info: &naga::valid::ExpressionInfo,
 ) -> ExprRepr {
     let module_context = func_context.module;
-    // let expr_type = match &expr_info.ty {
-    //     TypeResolution::Handle(handle) => &module.types[*handle].inner,
-    //     TypeResolution::Value(type_value) => &type_value,
-    // };
 
     let expr_type = module_context.resolve_inner_type(expr_info);
     let item_size = module_context.get_type_item_size(expr_type);
     let (lane_count, vector_count) = module_context.config.compute_sizes(item_size);
 
     match expr {
-        naga::Expression::As { expr, kind, convert } => {
-            let values_raw = translate_expr(func_context, builder, block, &func_context.function.expressions[*expr], &func_context.function_info[*expr]); //.into_scalars(func_context, builder);
-            let input_type = module_context.resolve_inner_type(&func_context.function_info[*expr]);
+        naga::Expression::As { expr: expr_handle, kind, convert } => {
+            let values_raw = func_context.get_expr(*expr_handle, builder, block);
+            let input_type = module_context.resolve_inner_type(&func_context.function_info[*expr_handle]);
 
             match (input_type, expr_type) {
                 (
@@ -187,9 +183,9 @@ fn translate_expr(
                 },
             }
         },
-        naga::Expression::Binary { op, left, right } => {
-            let left_values = translate_expr(func_context, builder, block, &func_context.function.expressions[*left], &func_context.function_info[*left]).into_vectors(func_context, builder);
-            let right_values = translate_expr(func_context, builder, block, &func_context.function.expressions[*right], &func_context.function_info[*right]).into_vectors(func_context, builder);
+        naga::Expression::Binary { op, left: left_handle, right: right_handle } => {
+            let left_values = func_context.get_expr(*left_handle, builder, block).into_scalars(func_context, builder);
+            let right_values = func_context.get_expr(*right_handle, builder, block).into_scalars(func_context, builder);
 
             ExprRepr::Vectors(
                 (0..vector_count).map(|vector_index| {
@@ -262,8 +258,8 @@ fn translate_expr(
             )
         }, */
         naga::Expression::Access { base: base_handle, index: index_handle } => {
-            let base_value = translate_expr(func_context, builder, block, &func_context.function.expressions[*base_handle], &func_context.function_info[*base_handle]).into_scalars(func_context, builder);
-            let index_value = translate_expr(func_context, builder, block, &func_context.function.expressions[*index_handle], &func_context.function_info[*index_handle]).into_scalars(func_context, builder);
+            let base_value = func_context.get_expr(*base_handle, builder, block).into_scalars(func_context, builder);
+            let index_value = func_context.get_expr(*index_handle, builder, block).into_scalars(func_context, builder);
 
             let base_pointer_type = module_context.resolve_inner_type(&func_context.function_info[*base_handle]);
             let base_type_handle = if let naga::TypeInner::Pointer { base, .. } = base_pointer_type { base } else { unreachable!() };
@@ -288,7 +284,7 @@ fn translate_expr(
             )
         },
         naga::Expression::AccessIndex { base: base_handle, index } => {
-            let base_value = translate_expr(func_context, builder, block, &func_context.function.expressions[*base_handle], &func_context.function_info[*base_handle]).into_scalars(func_context, builder);
+            let base_value = func_context.get_expr(*base_handle, builder, block).into_scalars(func_context, builder);
 
             let base_pointer_type = module_context.resolve_inner_type(&func_context.function_info[*base_handle]);
             let base_type_handle = if let naga::TypeInner::Pointer { base, .. } = base_pointer_type { base } else { unreachable!() };
@@ -415,12 +411,13 @@ pub fn translate_func(
     builder.switch_to_block(block);
 
 
-    let func_context = FunctionContext {
+    let mut func_context = FunctionContext {
         arguments: &arguments,
         constants_global_value,
-        module: module_context,
-        function,
+        emitted_exprs: HashMap::new(),
         function_info,
+        function,
+        module: module_context,
     };
 
     // eprintln!("{:#?}", function);
@@ -428,8 +425,8 @@ pub fn translate_func(
     for stat in function.body.iter() {
         match stat {
             naga::Statement::Store { pointer: pointer_handle, value: value_handle } => {
-                let pointer = translate_expr(&func_context, &mut builder, block, &function.expressions[*pointer_handle], &function_info[*pointer_handle]);
-                let value = translate_expr(&func_context, &mut builder, block, &function.expressions[*value_handle], &function_info[*value_handle]);
+                let pointer = func_context.get_expr(*pointer_handle, &mut builder, block);
+                let value = func_context.get_expr(*value_handle, &mut builder, block);
 
                 // eprintln!("Pointer = {:#?}", pointer);
                 // eprintln!("Value = {:#?}", value);
@@ -448,7 +445,18 @@ pub fn translate_func(
 
             //     fn_builder.ins().return_(&return_values);
             // },
-            _ => {},
+            naga::Statement::Emit(expr_range) => {
+                for expr_handle in expr_range.clone().into_iter() {
+                    if !func_context.emitted_exprs.contains_key(&expr_handle) {
+                        let expr = &function.expressions[expr_handle];
+                        let expr_info = &function_info[expr_handle];
+
+                        func_context.emitted_exprs.insert(expr_handle, translate_expr(&func_context, &mut builder, block, expr, expr_info));
+                    }
+                }
+            },
+            naga::Statement::Return { value: None } => {},
+            _ => panic!("unimplemented: {:?}", stat),
         }
     }
 
