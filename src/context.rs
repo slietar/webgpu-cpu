@@ -22,6 +22,7 @@ pub(crate) struct ModuleContext<'a, 'b> {
 impl<'a> ModuleContext<'a, '_> {
     pub fn get_type_item_size(&self, shader_type: &naga::TypeInner) -> usize {
         match shader_type {
+            naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Bool, width }) => 4,
             naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Float, width }) => *width as usize,
             naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Sint, width }) => *width as usize,
             naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Uint, width }) => *width as usize,
@@ -37,6 +38,7 @@ impl<'a> ModuleContext<'a, '_> {
         let (lane_count, vector_count) = self.config.compute_sizes(item_size);
 
         let cl_type = match (shader_type, lane_count) {
+            (naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Bool, width: 1 }), 4) => ir::types::I32X4,
             (naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Float, width: 4 }), 4) => ir::types::F32X4,
             (naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Float, width: 8 }), 2) => ir::types::F64X2,
             (naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Sint, width: 4 }), 4) => ir::types::I32X4,

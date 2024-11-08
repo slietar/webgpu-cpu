@@ -48,8 +48,8 @@ pub struct CompiledPipeline {
 
 impl CompiledPipeline {
     pub fn run(&self, thread_count: usize, bind_groups: &[BindGroup<'_>]) {
-        assert_eq!(thread_count % self.config.subgroup_width, 0);
-        let subgroup_count = thread_count / self.config.subgroup_width;
+        assert_eq!(thread_count % self.config.simul_thread_count, 0);
+        let subgroup_count = thread_count / self.config.simul_thread_count;
 
         // eprintln!("subgroup_count: {}", subgroup_count);
 
@@ -262,7 +262,7 @@ pub(crate) fn pack(layouts: &[naga::proc::TypeLayout]) -> (naga::proc::TypeLayou
         .iter()
         .map(|layout| layout.alignment)
         .max()
-        .unwrap();
+        .unwrap_or(naga::proc::Alignment::ONE);
 
     (naga::proc::TypeLayout { size: offset as u32, alignment }, offsets)
 }

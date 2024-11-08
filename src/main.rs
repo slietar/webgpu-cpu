@@ -18,63 +18,23 @@ use crate::config::Config;
 fn main() {
     let config = Config {
         bandwidth_size: 16,
-        subgroup_width: 4,
+        simul_thread_count: 4,
     };
 
     let pipeline_result = crate::jit::jit_compile("
-        struct S {
-            x: f32,
-            y: f32,
-        }
-
-        override blockSize = 16.0;
-
-        // const s : S = S { x: 2.0, y: 3.0 };
-        // const h = array(2.0, 3.0, 3.0, 4.0);
-        // const d : f32 = 4.0/2.0 + h[0];
-        const s: S = S(1, 2);
-        const c: f32 = 5;
-        const d: f32 = 6;
-        const e: i32 = 6;
-
-        // @id(1200) override specular_param: f32 = d;
-
-        // @group(0) @binding(0)
-        // var<storage, read> input: array<u32>;
-
         @group(0) @binding(0)
         var<storage, read_write> output: array<f32, 16>;
-
-        // var<workgroup> x: array<f32, 16>;
-
-        // fn foo(a: array<S, 4>) -> i32 {
-        //     // let b = array(S(1, 2), S(3, 4), S(5, 6), S(7, 8));
-        //     // a[0].x = 3;
-
-        //     return (*a)[0].x;
-        // }
 
         @compute
         @workgroup_size(1)
         fn main(@builtin(local_invocation_index) thread_id: u32) {
-            // var a = 3.0;
+            var a = 3.0;
 
-            // var b: i32 = 0;
-            // a = 5.0;
+            if ((thread_id > 1u) && !(thread_id < 3u)) {
+                a = 2.0;
+            }
 
-            var a = 3.0; // + output[thread_id];
-
-            // a = 4.0;
-            // a += d;
             output[thread_id] = a;
-
-            // foo(array(S(1, 2), S(3, 4), S(5, 6), S(7, 8)));
-            // let a = array(S(1, 2), S(3, 4), S(5, 6), S(7, 8));
-            // foo(&a[0]);
-
-            // output[thread_id].x = s.y * i32(thread_id);
-            // output[thread_id].y = 3.0;
-            // input[2] * 3.0 * f32(blockSize) * specular_param;
         }
     ", &config);
 
@@ -102,7 +62,7 @@ fn main() {
     pipeline.run(8, bind_groups);
 
     // eprintln!("{:#?}", pipeline);
-    eprintln!("{:?}", output_buffer);
+    // eprintln!("{:?}", output_buffer);
 
 
 /*     let module = naga::front::wgsl::parse_str("

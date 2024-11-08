@@ -23,13 +23,13 @@ impl ExprRepr {
         let config = func_context.module.config;
 
         match self {
-            ExprRepr::Constant(value, _) => vec![value; config.subgroup_width],
+            ExprRepr::Constant(value, _) => vec![value; config.simul_thread_count],
             ExprRepr::Scalars(scalars, _) => scalars,
             ExprRepr::Vectors(vectors) => {
                 let vector_count = vectors.len();
-                let lane_count = config.subgroup_width / vector_count;
+                let lane_count = config.simul_thread_count / vector_count;
 
-                (0..config.subgroup_width).map(|item_index| {
+                (0..config.simul_thread_count).map(|item_index| {
                     builder.ins().extractlane(vectors[item_index / lane_count], (item_index % lane_count) as u8)
                 }).collect::<Vec<_>>()
             },
@@ -40,10 +40,10 @@ impl ExprRepr {
         let config = func_context.module.config;
 
         match self {
-            ExprRepr::Constant(value, Some(ty)) => vec![builder.ins().splat(ty, value); config.subgroup_width],
+            ExprRepr::Constant(value, Some(ty)) => vec![builder.ins().splat(ty, value); config.simul_thread_count],
             ExprRepr::Scalars(scalars, Some(ty)) => {
                 let vector_count = scalars.len();
-                let lane_count = config.subgroup_width / vector_count;
+                let lane_count = config.simul_thread_count / vector_count;
 
                 (0..lane_count).map(|lane_index| {
                     let init_vector = builder.ins().scalar_to_vector(ty, scalars[0]);
@@ -71,7 +71,14 @@ pub(crate) fn translate_expr(
 
     let expr_type = module_context.resolve_inner_type(expr_info);
     let item_size = module_context.get_type_item_size(expr_type);
+
     let (lane_count, vector_count) = module_context.config.compute_sizes(item_size);
+
+    // eprintln!("Expr type {:?}", expr_type);
+    // eprintln!("Item size {:?}", item_size);
+    // eprintln!("Lane count {:?}", lane_count);
+    // eprintln!("Vector count {:?}", vector_count);
+    // eprintln!("");
 
     match expr {
         naga::Expression::As { expr: expr_handle, kind, convert } => {
@@ -157,10 +164,10 @@ pub(crate) fn translate_expr(
                     match builtin {
                         naga::BuiltIn::LocalInvocationIndex => {
                             let subgroup_index = builder.ins().load(types::I32, ir::MemFlags::new(), builtins_pointer, 0);
-                            let first_subgroup_thread_index = builder.ins().imul_imm(subgroup_index, module_context.config.subgroup_width as i64);
+                            let first_subgroup_thread_index = builder.ins().imul_imm(subgroup_index, module_context.config.simul_thread_count as i64);
 
                             ExprRepr::Scalars(
-                                (0..func_context.module.config.subgroup_width)
+                                (0..func_context.module.config.simul_thread_count)
                                     .map(|index| {
                                         builder.ins().iadd_imm(first_subgroup_thread_index, index as i64)
                                     })
@@ -194,6 +201,19 @@ pub(crate) fn translate_expr(
                     let right = right_values[vector_index];
 
                     match expr_type {
+                        naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Bool, .. }) => {
+                            match op {
+                                naga::BinaryOperator::Greater => ins.icmp(IntCC::UnsignedGreaterThan, left, right),
+                                naga::BinaryOperator::GreaterEqual => ins.icmp(IntCC::UnsignedGreaterThan, left, right),
+                                naga::BinaryOperator::Less => ins.icmp(IntCC::UnsignedLessThan, left, right),
+                                naga::BinaryOperator::LessEqual => ins.icmp(IntCC::UnsignedLessThanOrEqual, left, right),
+                                naga::BinaryOperator::Equal => ins.icmp(IntCC::Equal, left, right),
+                                naga::BinaryOperator::NotEqual => ins.icmp(IntCC::NotEqual, left, right),
+                                naga::BinaryOperator::LogicalAnd => ins.band(left, right),
+                                naga::BinaryOperator::LogicalOr => ins.bor(left, right),
+                                _ => unimplemented!("{:?}", op),
+                            }
+                        },
                         naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Float, .. }) => {
                             match op {
                                 naga::BinaryOperator::Add => ins.fadd(left, right),
@@ -221,11 +241,34 @@ pub(crate) fn translate_expr(
                                 _ => unimplemented!(),
                             }
                         },
-                        _ => unimplemented!(),
+                        _ => unimplemented!("{:?}", expr_type),
                     }
                 }).collect::<Vec<_>>()
             )
         },
+        naga::Expression::Unary { op, expr: handle } => {
+            let values = func_context.get_expr(*handle, builder, block).into_vectors(func_context, builder);
+
+            ExprRepr::Vectors(
+                values
+                    .iter()
+                    .map(|value| {
+                        let ins = builder.ins();
+
+                        match expr_type {
+                            naga::TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Bool, .. }) => {
+                                match op {
+                                    naga::UnaryOperator::LogicalNot => ins.bnot(*value),
+                                    _ => unimplemented!(),
+                                }
+                            },
+                            _ => unimplemented!(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            )
+        },
+
 /*         naga::Expression::Math { fun, arg, arg1, arg2, arg3 } => {
             let args = [Some(*arg), *arg1, *arg2, *arg3].iter().filter_map(|x| x.and_then(|handle| {
                 Some(translate_expr(fn_builder, block, function, function_info, &function.expressions[handle], &function_info[handle]))
@@ -456,6 +499,10 @@ pub fn translate_func(
         module: module_context,
     };
 
+    // HOME
+    eprintln!("{:#?}", function);
+    // eprintln!("{:#?}", function_info);
+
 
     // Initialize local variables
 
@@ -509,6 +556,10 @@ pub fn translate_func(
                         func_context.emitted_exprs.insert(expr_handle, translate_expr(&func_context, &mut builder, root_block, expr, expr_info));
                     }
                 }
+            },
+            naga::Statement::If { accept, condition, reject } => {
+                let condition_repr = func_context.get_expr(*condition, &mut builder, root_block); //.into_scalars(&func_context, &mut builder);
+                eprintln!("{:?}", condition_repr);
             },
             naga::Statement::Return { value: None } => {},
             _ => panic!("unimplemented: {:?}", stat),
