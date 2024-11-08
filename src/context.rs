@@ -61,7 +61,7 @@ impl<'a> ModuleContext<'a, '_> {
 pub(crate) struct FunctionContext<'a, 'b> {
     pub arguments: &'a [crate::translate::Argument],
     pub constants_global_value: ir::GlobalValue,
-    pub emitted_exprs: HashMap<naga::Handle<naga::Expression>, crate::translate::ExprRepr>,
+    pub emitted_exprs: HashMap<naga::Handle<naga::Expression>, crate::repr::ExprRepr>,
     pub function_info: &'a naga::valid::FunctionInfo,
     pub function: &'a naga::Function,
     // pub local_variable_slots: HashMap<naga::Handle<naga::LocalVariable>, ir::StackSlot>,
@@ -71,14 +71,14 @@ pub(crate) struct FunctionContext<'a, 'b> {
 }
 
 impl FunctionContext<'_, '_> {
-    pub fn get_expr(&self, handle: naga::Handle<naga::Expression>, builder: &mut cranelift::prelude::FunctionBuilder<'_>, block: ir::Block) -> crate::translate::ExprRepr {
+    pub fn get_expr(&self, handle: naga::Handle<naga::Expression>, builder: &mut cranelift::prelude::FunctionBuilder<'_>, block: ir::Block) -> crate::repr::ExprRepr {
         if let Some(expr_repr) = self.emitted_exprs.get(&handle) {
             expr_repr.clone()
         } else {
             let expr = &self.function.expressions[handle];
             let expr_info = &self.function_info[handle];
 
-            crate::translate::translate_expr(self, builder, block, expr, expr_info)
+            crate::expr::translate_expr(self, builder, block, expr, expr_info)
         }
     }
 }

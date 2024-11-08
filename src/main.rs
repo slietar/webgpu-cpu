@@ -4,6 +4,8 @@ mod translate;
 mod context;
 mod types;
 mod constants;
+mod expr;
+mod repr;
 
 use std::any::Any;
 use std::collections::HashMap;
