@@ -95,6 +95,7 @@ pub fn translate_func(
         let (layout, offsets) = crate::jit::pack(&layouts);
         let translated_alignment = translate_alignment(layout.alignment);
 
+        // TODO: Use builder.declare_var() instead for variables of small size
         let slot = builder.create_sized_stack_slot(StackSlotData {
             align_shift: translated_alignment,
             kind: ir::StackSlotKind::ExplicitSlot,
@@ -151,44 +152,8 @@ pub fn translate_func(
 
     // Statements
 
-    for stat in function.body.iter() {
-        match stat {
-            naga::Statement::Store { pointer: pointer_handle, value: value_handle } => {
-                let pointer = func_context.get_expr(*pointer_handle, &mut builder, root_block);
-                let value = func_context.get_expr(*value_handle, &mut builder, root_block);
-
-                let pointer_scalars = pointer.into_scalars(&func_context, &mut builder);
-                let value_scalars = value.into_scalars(&func_context, &mut builder);
-
-                for (pointer_scalar, value_scalar) in pointer_scalars.iter().zip(value_scalars.iter()) {
-                    builder.ins().store(ir::MemFlags::new(), *value_scalar, *pointer_scalar, 0);
-                }
-            },
-            // naga::Statement::Return { value } => {
-            //     let expr = &function.expressions[value.unwrap()];
-            //     let expr_info = &function_info[value.unwrap()];
-            //     let return_values = translate_expr(&mut fn_builder, module, block, function, function_info, expr, expr_info, &arg_offsets, global_var_map, config);
-
-            //     fn_builder.ins().return_(&return_values);
-            // },
-            naga::Statement::Emit(expr_range) => {
-                for expr_handle in expr_range.clone().into_iter() {
-                    if !func_context.emitted_exprs.contains_key(&expr_handle) {
-                        let expr = &function.expressions[expr_handle];
-                        let expr_info = &function_info[expr_handle];
-
-                        func_context.emitted_exprs.insert(expr_handle, translate_expr(&func_context, &mut builder, root_block, expr, expr_info));
-                    }
-                }
-            },
-            naga::Statement::If { accept, condition, reject } => {
-                let condition_repr = func_context.get_expr(*condition, &mut builder, root_block); //.into_scalars(&func_context, &mut builder);
-                eprintln!("{:?}", condition_repr);
-            },
-            naga::Statement::Return { value: None } => {},
-            _ => panic!("unimplemented: {:?}", stat),
-        }
-    }
+    let init_mask = ExprRepr::Constant(builder.ins().iconst(ir::types::I32, 1), Some(ir::types::I32X4));
+    crate::block::translate_block(&function.body, root_block, &init_mask, &mut func_context, &mut builder);
 
     builder.ins().return_(&[]);
 

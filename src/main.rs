@@ -6,6 +6,8 @@ mod types;
 mod constants;
 mod expr;
 mod repr;
+mod compiler;
+mod block;
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -32,12 +34,13 @@ fn main() {
         fn main(@builtin(local_invocation_index) thread_id: u32) {
             var a = 3.0;
 
-            if ((thread_id > 1u) && !(thread_id < 3u)) {
+            if (true) {
                 a = 2.0;
             }
 
             output[thread_id] = a;
         }
+
     ", &config);
 
     let pipeline = match pipeline_result {
@@ -64,7 +67,7 @@ fn main() {
     pipeline.run(8, bind_groups);
 
     // eprintln!("{:#?}", pipeline);
-    // eprintln!("{:?}", output_buffer);
+    eprintln!("{:?}", output_buffer);
 
 
 /*     let module = naga::front::wgsl::parse_str("

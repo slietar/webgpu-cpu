@@ -84,6 +84,10 @@ pub(crate) fn translate_expr(
         }, */
         naga::Expression::Literal(literal) => {
             match literal {
+                naga::Literal::Bool(v) => {
+                    let item = builder.ins().iconst(types::I32, if *v { 1 } else { 0 });
+                    ExprRepr::Constant(item, Some(types::I32X4))
+                },
                 naga::Literal::F32(v) => {
                     let item = builder.ins().f32const(*v);
                     ExprRepr::Constant(item, Some(types::F32X4))

@@ -47,7 +47,49 @@ impl ExprRepr {
                 }).collect::<Vec<_>>()
             },
             ExprRepr::Vectors(vectors) => vectors,
-            _ => unreachable!(),
+            _ => unreachable!("{:?}", self),
+        }
+    }
+
+    pub fn and(&self, other: &ExprRepr, func_context: &FunctionContext, builder: &mut FunctionBuilder<'_>) -> ExprRepr {
+        match (self, other) {
+            // Expected types are i8
+            (ExprRepr::Constant(lhs, _), ExprRepr::Constant(rhs, _))
+                => ExprRepr::Constant(builder.ins().band(*lhs, *rhs), Some(ir::types::I32X4)),
+            _ => {
+                let lhs_vectors = self.clone().into_vectors(func_context, builder);
+                let rhs_vector = other.clone().into_vectors(func_context, builder);
+
+                ExprRepr::Vectors(
+                    lhs_vectors
+                        .into_iter()
+                        .zip(rhs_vector.into_iter())
+                        .map(|(lhs, rhs)| {
+                            builder.ins().band(lhs, rhs)
+                        })
+                        .collect::<Vec<_>>()
+                )
+            },
+        }
+    }
+
+    pub fn not(&self, func_context: &FunctionContext, builder: &mut FunctionBuilder<'_>) -> ExprRepr {
+        match self {
+            // Expected types are i8
+            ExprRepr::Constant(value, _)
+                => ExprRepr::Constant(builder.ins().bnot(*value), None),
+            _ => {
+                let vectors = self.clone().into_vectors(func_context, builder);
+
+                ExprRepr::Vectors(
+                    vectors
+                        .into_iter()
+                        .map(|vector| {
+                            builder.ins().bnot(vector)
+                        })
+                        .collect::<Vec<_>>()
+                )
+            },
         }
     }
 }

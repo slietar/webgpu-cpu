@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use cranelift::jit;
 use cranelift::module::{DataDescription, Module};
 use cranelift::prelude::Configurable;
+use naga::valid::Capabilities;
 use crate::config::Config;
 use crate::constants::build_constant;
 
@@ -99,7 +100,7 @@ pub fn jit_compile(source_code: &str, config: &Config) -> Result<CompiledPipelin
     let module = naga::front::wgsl::parse_str(source_code)?;
 
     let module_info = naga::valid::Validator::new(
-        naga::valid::ValidationFlags::default(), naga::valid::Capabilities::default() | naga::valid::Capabilities::FLOAT64,
+        naga::valid::ValidationFlags::default(), Capabilities::default() | Capabilities::FLOAT64,
     ).validate(&module)?;
 
     let mut layouter = naga::proc::Layouter::default();
